@@ -61,6 +61,20 @@ export function mailDocument(
     link.setAttribute("target", "_blank");
     link.setAttribute("rel", "noopener noreferrer");
   });
+  // Center the email's own outer layout boxes without changing their widths,
+  // inner spacing, display mode or text alignment.
+  const outerBoxes = [
+    doc.documentElement,
+    doc.body,
+    ...Array.from(doc.body.children).filter((el) =>
+      /^(DIV|TABLE|MAIN|ARTICLE|SECTION|HEADER|FOOTER)$/.test(el.tagName),
+    ),
+  ];
+  outerBoxes.forEach((el) => {
+    const box = el as HTMLElement;
+    box.style.setProperty("margin-left", "auto", "important");
+    box.style.setProperty("margin-right", "auto", "important");
+  });
   const images = remote ? "blob: https: http:" : "blob:";
   doc.documentElement.setAttribute("lang", "zh-CN");
   doc.head.innerHTML = `<meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src ${images}; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>

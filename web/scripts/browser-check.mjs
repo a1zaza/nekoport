@@ -414,7 +414,7 @@ try {
         message: msg,
         content: {
           text: plainBody,
-          html: '<html><body bgcolor="#fdf6e3" text="#123456" style="background-color:#fdf6e3;color:#123456"><style>.mail-card{padding:24px;border:2px solid #456;font-size:18px;display:flex;flex-wrap:wrap;gap:12px;font-family:霞鹜臻楷;position:relative;box-shadow:0 2px 4px #0003}@supports (display:grid){.mail-card{display:grid;grid-template-columns:1fr 2fr}}</style><div class="mail-card" style="font-weight:bold">样式保留测试</div><h2>项目进展</h2><table bgcolor="white"><tr><td bgcolor="#fff"><font color="black">主题配色测试</font></td></tr></table><p>你好，这是一封邮件。</p><div style="height:1400px">长邮件末尾测试</div><img src="https://tracker.example.test/pixel" onerror="window.hacked=true"><script>window.hacked=true</script>',
+          html: '<html><body bgcolor="#fdf6e3" text="#123456" style="background-color:#fdf6e3;color:#123456"><style>.mail-card{max-width:820px;box-sizing:border-box;padding:24px;border:2px solid #456;font-size:18px;display:flex;flex-wrap:wrap;gap:12px;font-family:霞鹜臻楷;position:relative;box-shadow:0 2px 4px #0003}@supports (display:grid){.mail-card{display:grid;grid-template-columns:1fr 2fr}}</style><div class="mail-card" style="font-weight:bold;margin:0!important">样式保留测试</div><h2>项目进展</h2><table bgcolor="white"><tr><td bgcolor="#fff"><font color="black">主题配色测试</font></td></tr></table><p>你好，这是一封邮件。</p><div style="height:1400px">长邮件末尾测试</div><img src="https://tracker.example.test/pixel" onerror="window.hacked=true"><script>window.hacked=true</script>',
           attachments: [],
         },
       };
@@ -674,10 +674,80 @@ try {
     const parent = el.parentElement.getBoundingClientRect();
     return {
       width: r.width,
+      available: el.parentElement.clientWidth,
+      maxWidth: getComputedStyle(el).maxWidth,
       offset: Math.abs(r.left + r.right - (parent.left + parent.right)),
     };
   });
-  assert.equal(centered.width, 600);
+  assert.ok(centered.width > 600);
+  assert.ok(Math.abs(centered.width - centered.available) <= 1);
+  assert.equal(centered.maxWidth, "none");
+  async function assertEmailBoxCentered(selector, width) {
+    const box = await page
+      .frameLocator("iframe")
+      .locator(selector)
+      .evaluate((el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          width: rect.width,
+          offset: Math.abs(rect.left + rect.right - innerWidth),
+        };
+      });
+    assert.ok(
+      Math.abs(box.width - width) <= 1,
+      `${selector} does not follow email width`,
+    );
+    assert.ok(box.offset <= 2, `${selector} is not centered`);
+  }
+  await assertEmailBoxCentered(".mail-card", 820);
+  const initialRootStyle = await page
+    .frameLocator("iframe")
+    .locator("html")
+    .getAttribute("style");
+  const initialBodyStyle = await page
+    .frameLocator("iframe")
+    .locator("body")
+    .getAttribute("style");
+  await page
+    .frameLocator("iframe")
+    .locator("html")
+    .evaluate((el) => (el.style.maxWidth = "1100px"));
+  await page
+    .frameLocator("iframe")
+    .locator("body")
+    .evaluate((el) => {
+      el.style.maxWidth = "940px";
+      el.style.width = "100%";
+    });
+  await assertEmailBoxCentered("html", 1100);
+  await assertEmailBoxCentered("body", 940);
+  await assertEmailBoxCentered(".mail-card", 820);
+  const mailTable = page.frameLocator("iframe").locator("table");
+  const initialTableStyle = await mailTable.getAttribute("style");
+  await mailTable.evaluate((el) => {
+    el.setAttribute("width", "760");
+    el.style.maxWidth = "760px";
+  });
+  await assertEmailBoxCentered("table", 760);
+  await mailTable.evaluate((el, style) => {
+    el.removeAttribute("width");
+    if (style === null) el.removeAttribute("style");
+    else el.setAttribute("style", style);
+  }, initialTableStyle);
+  await page
+    .frameLocator("iframe")
+    .locator("body")
+    .evaluate(
+      (el, style) => el.setAttribute("style", style || ""),
+      initialBodyStyle,
+    );
+  await page
+    .frameLocator("iframe")
+    .locator("html")
+    .evaluate(
+      (el, style) => el.setAttribute("style", style || ""),
+      initialRootStyle,
+    );
   assert.ok(
     !(await page.locator("iframe.mail-frame").getAttribute("sandbox")).includes(
       "allow-scripts",
@@ -1321,7 +1391,7 @@ try {
   await page.keyboard.press("Escape");
   assert.deepEqual(errors, []);
   console.log(
-    "浏览器验证通过：批量操作后选择计数、失败保留选择、请求期间新增选择及刷新移除失效选择、移动菜单越过弹窗裁切、向上展开及手机完整选择、归档按钮与无目标/已归档保护、默认文件夹顺序与自定义文件夹自然排序、网络恢复自动清理刷新提示且保留操作错误、发件人名称与历史发件箱地址显示、修改密码滑动开关、自定义下拉框与对齐历史折叠、同步设置弹窗桌面/手机与关闭重开、账户安全、全历史任务取消/继续、定时设置及共享登录信息/服务器表单对齐、概览首屏、空邮箱引导与搜索导航、宽屏/手机布局、纯文本缩进与长行折行、邮件原始配色、600px 居中与自适应高度、HTML 隔离、图片授权及草稿发送。",
+    "浏览器验证通过：批量操作后选择计数、失败保留选择、请求期间新增选择及刷新移除失效选择、移动菜单越过弹窗裁切、向上展开及手机完整选择、归档按钮与无目标/已归档保护、默认文件夹顺序与自定义文件夹自然排序、网络恢复自动清理刷新提示且保留操作错误、发件人名称与历史发件箱地址显示、修改密码滑动开关、自定义下拉框与对齐历史折叠、同步设置弹窗桌面/手机与关闭重开、账户安全、全历史任务取消/继续、定时设置及共享登录信息/服务器表单对齐、概览首屏、空邮箱引导与搜索导航、宽屏/手机布局、纯文本缩进与长行折行、邮件原始配色、邮件自身宽度与外层布局居中、自适应高度、HTML 隔离、图片授权及草稿发送。",
   );
   await context.close();
 } catch (error) {

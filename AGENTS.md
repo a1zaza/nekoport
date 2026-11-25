@@ -21,7 +21,7 @@
 - 就绪检查：`http://127.0.0.1:8080/health/ready`。Go 源码修改后须编译并重启才生效，前端由 Vite 热更新；内存会话在后端重启后失效，沿用原凭据重新登录。
 - 后端验证：根目录 `go test -race ./...`、`go vet ./...`。前端命令在 `web/` 执行：`npm ci --ignore-scripts`、`npm run typecheck`、`npm test`、`npm run format:check`。
 - 浏览器回归使用既有 Chromium 与模拟 API，不安装系统浏览器，不连接真实邮箱；可用 `NEKOPORT_CHROMIUM` 指定浏览器，或 `NEKOPORT_UI_URL=http://127.0.0.1:5173` 复用现有开发页。局域网兼容性也需验证。
-- 发布构建先前端后 Go，关闭 CGO 并用 `-buildvcs=false`；Docker 保持非 root、tini/exec、bridge 网络。不声称尚未执行的镜像构建或发布已经完成。
+- 发布构建先前端后 Go，关闭 CGO 并用 `-buildvcs=false`；本地镜像使用 `docker build -f deploy/Dockerfile -t nekoport:local .`，可用 `docker run --rm --network none --read-only nekoport:local version` 验证入口；Docker 保持非 root、tini/exec、bridge 网络。不声称尚未执行的镜像构建或发布已经完成。
 - 详细启动、测试、部署与恢复流程见 [开发文档](docs/development.md) 和 [README](README.md)。
 
 # 测试账号
@@ -34,10 +34,11 @@
 # 常见问题
 
 - **邮件安全**：后端净化、DOMPurify、sandbox iframe 和独立 CSP 必须保留。远程图片默认拦截，CID 仅允许受控非 SVG 图片；HTML 可同源供宿主测量，但绝不能同时允许脚本。
-- **邮件显示**：HTML 保留安全样式和原始配色，最大 600px 居中并自动撑高；纯文本用 React 文本节点的 pre，铺满阅读区、不设最大宽度，保留缩进和长行折行。不要恢复平台配色覆盖或内部纵向滚动条。保留常用 Flex/Grid、中文字体及条件样式；前后端样式规则同步维护，规则放宽时升级 HTMLVersion 并从本地原始 MIME 恢复旧缓存。
+- **邮件显示**：HTML 保留安全样式和原始配色，平台不限制最大宽度，遵循邮件自身 width/max-width，仅将根与外层布局容器水平居中并自动撑高，保留文字对齐及内部间距；纯文本用 React 文本节点的 pre，铺满阅读区、不设最大宽度，保留缩进和长行折行。不要恢复平台配色覆盖或内部纵向滚动条。保留常用 Flex/Grid、中文字体及条件样式；前后端样式规则同步维护，规则放宽时升级 HTMLVersion 并从本地原始 MIME 恢复旧缓存。
 - **地址显示**：API 派生可读名称/地址，解码 MIME 字符集并去掉语法引号；保留原始 From/To/CC/Reply-To 用于回复发送，不全局删除名称内部引号，不要求旧记录重新同步。
 - **请求恢复**：AbortError 不可转换为成功数据或普通网络错误；读取成功只清除对应刷新提示，不清除无关发送/保存错误。后台读取须串行合并并防止旧结果覆盖，写请求不自动重试。批量操作仅在请求成功后清理对应选择，保留请求期间新增选择；列表成功刷新后剔除不在当前列表的选中 ID，失败不清空选择。
 - **同步一致性**：远端身份包含账号/目录/UIDVALIDITY/UID；游标与邮件批次原子提交，嵌套进度深拷贝，失败不得推进游标。近期筛选使用内部接收日期；失败/取消/部分扫描禁止删除扫尾，缺失 UID 二次确认，NoSelect 不冒充目录消失。普通同步为 quick，仅补新增 UID；远端删除/归档移出与文件夹消失由 history/reconcile 清理，周期以账号持久化设置为准。同步日志按 quick 与完整对齐（含 history）分别保留每邮箱最近 5 次终态任务；进行中/暂停任务不淘汰。计数与索引同事务提交，每任务保留最近 200 条过程明细、完整累计统计，旧任务不补造明细。
+- **构建缺包**：部署密钥目录只用根级 `/secrets/` 忽略，`internal/secrets/` 是必须提交的 Go 源码；本地构建通过后还需用 Git 跟踪与可提交文件构成的干净目录验证，避免被本机未跟踪源码掩盖缺包，不用 go get 安装本模块自身。
 - **故障保护**：持久化写失败冻结变更，恢复不跳过中段损坏或缺失提交；不确定 SMTP/归档任务禁止自动重放。认证错误保留脱敏阶段信息，超时/断开/SMTP 4xx 不冒充确定的密码错误。
 - **局域网写信**：HTTP 来源不能依赖 crypto.randomUUID；用 getRandomValues 生成发送幂等键，组件只初始化一次，重试复用，不改用 Math.random。
 - 当前未修复问题集中在 [开发文档的待处理问题](docs/development.md#待处理问题)，运行配置以当前持久化状态为准，不照搬历史快照。

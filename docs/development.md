@@ -96,7 +96,7 @@ GitHub Workflow 沿用 v2way 的双原生 runner、固定 Action commit、按 di
 
 HTML 保留经过属性白名单筛选的内联样式、样式表、类名和媒体查询。平台背景仅强制应用在 html/body，内部卡片、表格和文本保留原配色。拒绝 CSS URL、导入、外部字体、转义和危险属性，即使允许远程图片也不开放 CSS 资源。旧版缓存通过 htmlVersion 检测，读取时从本地原始 MIME 恢复并持久化，无需重新同步；本节替代此前清理所有 style/bgcolor/color 的规则。
 
-### 原始邮件配色与宽度（2026-11-24，当前规则）
+### 原始邮件配色与宽度（2026-11-24）
 
 按用户要求取消邮件主题覆盖，不再给 HTML 正文设置平台背景、前景、链接或边框颜色。保留净化后的 html/body 背景与配色；未指定配色时使用浏览器浅色默认。600px 最大宽度应用在外部 iframe/纯文本容器，居中容器而非居中文本；小屏宽度 100%。HTMLVersion=3 从原始 MIME 恢复旧缓存的根属性及新增允许的排版样式。本节替代此前“根背景跟随平台”的规则，安全过滤与图片授权策略保持有效。
 
@@ -126,7 +126,7 @@ MailFrame 组件自动测量文档，使用 ResizeObserver 和资源 load 事件
 
 ### 纯文本阅读宽度
 
-纯文本 pre 铺满阅读区，不设最大宽度和水平居中；保持原换行、缩进、内边距及长行折行。HTML iframe 仍最大 600px 并居中。此规则替代之前对纯文本也使用 600px 的描述。
+纯文本 pre 铺满阅读区，不设最大宽度和水平居中；保持原换行、缩进、内边距及长行折行。HTML iframe 铺满阅读区，遵循邮件本身宽度，外层布局容器水平居中。此规则替代之前对纯文本也使用 600px 的描述。
 
 ### 邮件地址展示（2026-11-25）
 
@@ -162,7 +162,7 @@ bootstrap/SyncPanel 读取重叠、旧响应覆盖与 Failed to fetch 提示残�
 
 前后端保留常用 Flex/Grid、间距、相对/绝对/粘性定位、变换、阴影、透明度、溢出控制、中文字体名称及 @supports 条件样式，同时保留邮件表格的 align/valign/cellpadding/cellspacing 等展示属性。此规则替代此前对全部定位属性的拒绝；仍使用属性白名单。
 
-继续拒绝脚本、事件处理器、表单、嵌套 iframe、SVG、CSS URL/导入/外部字体、CSS 转义、自定义属性与 var()/attr()、固定定位。远程图片仍仅对单封授权的 HTTP/HTTPS img 开放，CSS 背景图片不随授权开放。保留 CSP、sandbox 和 600px 最大宽度，不承诺执行邮件的交互内容。
+继续拒绝脚本、事件处理器、表单、嵌套 iframe、SVG、CSS URL/导入/外部字体、CSS 转义、自定义属性与 var()/attr()、固定定位。远程图片仍仅对单封授权的 HTTP/HTTPS img 开放，CSS 背景图片不随授权开放。保留 CSP、sandbox，邮件自身 width/max-width 与外层居中布局，不承诺执行邮件的交互内容。
 
 HTMLVersion 由 mail.HTMLVersion 常量维护；版本 3 在读取旧缓存时使用已有本地原始 MIME 重新生成 HTML 并持久化，不连接服务器重新同步，也不改写纯文本或附件列表。没有原始 MIME 的历史记录保持现有缓存。Go 代码更新需要重新编译并重启后端才会生效，Vite 只热更新前端。
 
@@ -185,3 +185,25 @@ HTMLVersion 由 mail.HTMLVersion 常量维护；版本 3 在读取旧缓存时�
 新增 group=quick/full 可筛选 GET /api/v1/accounts/{id}/sync-tasks，原列表分页保持兼容，任务详情接口继续返回完整保留明细；bootstrap 不包含过程明细，避免 SSE 刷新重复发送大日志。设置弹窗每 5 秒在页面可见时分别刷新两类任务，关闭时取消。
 
 旧任务仍可显示既有状态与进度，明确提示“旧版任务未记录新增、删除明细”；新任务开始记录，不根据当前邮件反推历史变化。继续任务的计数累计已提交结果，配置变化导致重新枚举时保留日志并记录原因。
+
+### 本地 Docker 构建验证（2026-11-25）
+
+在用户明确要求后执行 `docker build -f deploy/Dockerfile -t nekoport:local .` 成功，覆盖 npm ci、前端类型检查与 Vite 发布构建、Go 模块下载、关闭 CGO 的编译及运行镜像导出。此次为本机 linux/amd64 单架构构建，不代表 arm64 容器运行或 GHCR 发布已经验证。
+
+镜像为 `nekoport:local`，Docker inspect 报告大小 14005055 字节，默认用户 1000:1000，入口为 tini → entrypoint.sh，源码标签为 https://github.com/a1zaza/nekoport。通过 `docker run --rm --network none --read-only nekoport:local version` 验证输出 `nekoport 0.1.0`，该短时验证不挂载数据、不开端口、不启动邮件服务。
+
+构建有 Vite 单个 JS chunk 超过 500 kB 的提示，未阻止构建；没有据此扩大范围修改打包拆分。镜像保存在本机，没有另行推送镜像或启动 Compose 服务。
+
+### HTML 邮件自身宽度（2026-11-25，当前规则）
+
+HTML iframe 铺满阅读区，取消平台的 600px 最大宽度限制。保留邮件 html/body 及原有外层 div/table/main/article/section/header/footer 的 width、max-width、display 与文字对齐；仅把这些外层容器的水平边距设为 auto，使其在可用空间中居中。内部元素的边距与排版不覆盖，不额外包装正文，保持原 CSS 选择器结构。没有声明宽度的邮件按浏览器正常块布局使用可用宽度，窄屏遵循邮件自己的响应式规则。
+
+继续通过 MailFrame 自动撑高，长邮件由外层阅读区滚动；纯文本维持全宽 pre，不居中。此规则替代此前所有平台固定 600px 的约定，只涉及前端展示，不变更净化白名单、HTML 缓存版本或服务器邮件内容。
+
+### Actions 缺失 internal/secrets 的原因与修复
+
+Git 的 `secrets/` 规则会忽略任意层级同名目录，曾导致 `internal/secrets/vault.go` 和 `vault_test.go` 没有进入首次提交。它们是加密凭据的程序源码，不是实际凭据文件；缺失时 Go 对本模块内部路径报“no required module provides package”，不能通过 go get 修复。实际部署密钥位于根目录 secrets，忽略规则限定为 `/secrets/`，同时继续忽略 .data。
+
+本地测试和 Docker 构建读取工作目录，仍可能使用未提交甚至被 Git 忽略的源码，所以本地通过不代表远端检出完整。修复规则后，两份源码都必须纳入提交；仅提交 .gitignore 不够。发布工作流在检出后使用 git ls-files --error-unmatch 检查这两个文件，缺失时在镜像构建前失败。
+
+此次验证从 Git 跟踪文件及未被忽略的待提交文件导出干净目录，排除本地数据、密钥、node_modules 和旧 dist，在其中完成 Go 全量竞态测试、vet 与 Docker 构建，镜像为 nekoport:ci-check（linux/amd64）。这验证了待提交修复，不代表当前远端 HEAD 已修复；提交后还应以实际检出/归档快照为准。

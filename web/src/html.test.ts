@@ -117,3 +117,34 @@ it("保留现代排版、中文字体和条件样式，保持资源与脚本隔�
   expect(doc.querySelector("script,[onclick]")).toBeNull();
   expect(css).not.toMatch(/fixed|tracker\.test|var\(/);
 });
+
+it("采用邮件自身宽度并居中外层布局，保持文字和内部间距", () => {
+  const doc = new DOMParser().parseFromString(
+    mailDocument(
+      `<html style="max-width:1100px"><body style="max-width:940px;margin:0!important;text-align:left"><style>.mail-root{width:100%;max-width:820px}</style><div class="mail-root" style="margin:0!important;text-align:right"><p style="margin-left:20px">正文</p></div><table width="760" style="max-width:760px;margin-left:0!important"><tr><td>表格</td></tr></table></body></html>`,
+    ),
+    "text/html",
+  );
+  expect(doc.documentElement.style.maxWidth).toBe("1100px");
+  expect(doc.body.style.maxWidth).toBe("940px");
+  expect(doc.body.style.textAlign).toBe("left");
+  expect(doc.querySelector(".mail-root")?.getAttribute("style")).toContain(
+    "text-align: right",
+  );
+  expect(doc.querySelector("style")?.textContent).toContain("max-width:820px");
+  expect(doc.querySelector("table")?.getAttribute("width")).toBe("760");
+  for (const el of [
+    doc.documentElement,
+    doc.body,
+    doc.querySelector(".mail-root")!,
+    doc.querySelector("table")!,
+  ]) {
+    const style = (el as HTMLElement).style;
+    expect(style.marginLeft).toBe("auto");
+    expect(style.marginRight).toBe("auto");
+  }
+  expect(doc.querySelector("p")?.style.marginLeft).toBe("20px");
+  expect(doc.querySelector("style")?.textContent).not.toContain(
+    "max-width:600px",
+  );
+});

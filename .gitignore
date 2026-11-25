@@ -1,6 +1,6 @@
 .data/
 data/
-secrets/
+/secrets/
 backups/
 bin/
 web/node_modules/

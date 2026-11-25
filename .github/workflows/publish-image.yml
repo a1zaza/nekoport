@@ -35,6 +35,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: 检查必要源码已纳入仓库
+        shell: bash
+        run: |
+          git ls-files --error-unmatch internal/secrets/vault.go internal/secrets/vault_test.go > /dev/null
+
       - name: 生成镜像地址
         id: image
         shell: bash
