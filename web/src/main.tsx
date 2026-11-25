@@ -2005,6 +2005,7 @@ function SettingsPage({
               key={`${syncAccount.id}:${syncAccount.revision}`}
               account={syncAccount}
               status={data.syncStatus?.[syncAccount.id]}
+              idle={data.idleStatus?.[syncAccount.id]}
               onSaved={onSaved}
               onBusyChange={setSyncBusy}
             />
@@ -2057,21 +2058,9 @@ function SettingsPage({
                 />
               </Field>
             </div>
-            <Field label="快速同步间隔（秒，30–3600）">
-              <input
-                type="number"
-                min={30}
-                max={3600}
-                required
-                value={value.quickSyncIntervalSeconds || 60}
-                onChange={(e) =>
-                  setValue({
-                    ...value,
-                    quickSyncIntervalSeconds: Number(e.target.value),
-                  })
-                }
-              />
-            </Field>
+            <p className="muted">
+              增量同步通过 IMAP IDLE 实时监听，断线自动重连，无需设置轮询间隔。
+            </p>
             <label className="check">
               <input
                 type="checkbox"
@@ -2138,8 +2127,7 @@ function SettingsPage({
             <h2>nekoport</h2>
             <p className="muted">个人使用 · Go + React · JSON / JSONL</p>
             <small className="muted">
-              已同步 {data.total} 封邮件 · 快速同步每{" "}
-              {data.settings.quickSyncIntervalSeconds || 60} 秒 ·
+              已同步 {data.total} 封邮件 · IMAP IDLE 实时监听 ·
               按邮箱计划完整对齐
             </small>
           </div>

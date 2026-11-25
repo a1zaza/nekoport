@@ -26,6 +26,7 @@ type Account struct {
 	Revision                 int      `json:"revision"`
 }
 type Mailbox struct {
+	NoSelect         bool      `json:"noSelect,omitempty"`
 	LastObservedUID  uint32    `json:"lastObservedUid,omitempty"`
 	LastReconciledAt time.Time `json:"lastReconciledAt,omitempty"`
 	ID               string    `json:"id"`
@@ -117,7 +118,8 @@ type Operation struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 type Settings struct {
-	AuthRevision             int    `json:"authRevision"`
+	AuthRevision int `json:"authRevision"`
+	// Legacy checkpoint field; ignored by the IDLE scheduler.
 	QuickSyncIntervalSeconds int    `json:"quickSyncIntervalSeconds"`
 	Username                 string `json:"username"`
 	PasswordHash             string `json:"passwordHash"`

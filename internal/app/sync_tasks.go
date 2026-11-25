@@ -62,9 +62,9 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 		if kind == "quick" && quick != nil {
 			active = quick
 		}
-		// A periodic quick task may queue beside a historical task, but the account
+		// An automatic quick task may queue beside a historical task, but the account
 		// worker still executes one batch at a time and always drains quick first.
-		auxiliary := kind == "quick" && trigger == "timer" && primary != nil && quick == nil
+		auxiliary := kind == "quick" && (trigger == "timer" || trigger == "idle") && primary != nil && quick == nil
 		if active != nil && !auxiliary {
 			result = active.Clone()
 			if kind == "history" && result.Kind != "history" {
@@ -210,7 +210,6 @@ func (a *App) scheduleSync(now time.Time) {
 	}
 	type due struct {
 		id, kind, task, trigger string
-		delivery                bool
 	}
 	var list []due
 	a.Store.Read(func(s domain.State, _ storage.Index) {
@@ -235,13 +234,8 @@ func (a *App) scheduleSync(now time.Time) {
 					active = &copy
 				}
 			}
-			quick := !now.Before(st.NextQuick)
 			if active != nil {
-				if quick && active.Kind != "quick" {
-					list = append(list, due{id: id, kind: "quick", delivery: true})
-				} else {
-					list = append(list, due{id: id, task: active.ID, delivery: quick})
-				}
+				list = append(list, due{id: id, task: active.ID})
 				continue
 			}
 			var retry *domain.SyncTask
@@ -254,7 +248,7 @@ func (a *App) scheduleSync(now time.Time) {
 				}
 			}
 			if retry != nil {
-				list = append(list, due{id: id, task: retry.ID, delivery: quick})
+				list = append(list, due{id: id, task: retry.ID})
 				continue
 			}
 			if st.PendingReconcile || x.ReconcileOn() && !now.Before(st.NextFull) {
@@ -262,9 +256,7 @@ func (a *App) scheduleSync(now time.Time) {
 				if st.PendingReconcile {
 					source = "manual"
 				}
-				list = append(list, due{id: id, kind: "reconcile", delivery: quick, trigger: source})
-			} else if quick {
-				list = append(list, due{id: id, kind: "quick", delivery: true})
+				list = append(list, due{id: id, kind: "reconcile", trigger: source})
 			}
 		}
 	})
@@ -283,15 +275,7 @@ func (a *App) scheduleSync(now time.Time) {
 			}
 			_, _ = a.CreateSyncTask(v.id, v.kind, source, "")
 		}
-		if v.delivery {
-			_ = a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
-				st := s.SyncStatus[v.id]
-				st.AccountID = v.id
-				st.NextQuick = now.Add(time.Duration(s.Settings.QuickSeconds()) * time.Second)
-				return []storage.Op{storage.Put("syncStatus", v.id, st)}, nil
-			})
-		}
-		a.kick(v.id, v.delivery)
+		a.kick(v.id, false)
 	}
 }
 
@@ -421,9 +405,6 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 		var boxes []domain.Mailbox
 		a.Store.Read(func(s domain.State, _ storage.Index) {
 			for _, info := range infos {
-				if slices.Contains(info.Attributes, imap.NoSelectAttr) {
-					continue
-				}
 				var box domain.Mailbox
 				for _, b := range s.Mailboxes {
 					if b.AccountID == x.ID && b.Name == info.Name {
@@ -431,6 +412,14 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 						break
 					}
 				}
+				if slices.Contains(info.Attributes, imap.NoSelectAttr) {
+					if box.ID != "" {
+						box.NoSelect = true
+						boxes = append(boxes, box)
+					}
+					continue
+				}
+				box.NoSelect = false
 				if box.ID == "" {
 					box = domain.Mailbox{ID: storage.ID(), AccountID: x.ID, Name: info.Name, Role: role(info.Name, info.Attributes)}
 				}
@@ -757,7 +746,7 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 			account.LastSync = time.Now().UTC().Format(time.RFC3339)
 			if t.Kind == "quick" {
 				st.LastQuick = t.FinishedAt
-				st.NextQuick = t.FinishedAt.Add(time.Duration(s.Settings.QuickSeconds()) * time.Second)
+				st.NextQuick = time.Time{}
 			} else {
 				st.LastFull = t.FinishedAt
 				st.NextFull = t.FinishedAt.Add(time.Duration(account.ReconcileMinutes()) * time.Minute)

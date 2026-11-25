@@ -95,9 +95,43 @@ it("按完整对齐和快速同步分类显示日志、对比统计及旧日志�
   await user.click(screen.getByRole("tab", { name: /快速同步/ }));
   expect(screen.queryByRole("button", { name: /完整对齐 ·/ })).toBeNull();
   expect(screen.getByText("旧版任务未记录新增、删除明细。")).toBeTruthy();
-  expect(
-    screen.getByText(/快速同步只拉取新增邮件，不检查远端删除/),
-  ).toBeTruthy();
+  expect(screen.getByText(/快速同步由 IDLE 新邮件事件或手动触发/)).toBeTruthy();
   await user.keyboard("{ArrowLeft}");
   expect(full.getAttribute("aria-selected")).toBe("true");
+});
+
+it("显示 IDLE 的部分连接、重连提示及暂停状态", async () => {
+  vi.mocked(api).mockResolvedValue({ items: [] });
+  const account = { id: "a", name: "工作邮箱", syncDays: 30 } as Account;
+  const idle = {
+    state: "reconnecting",
+    connected: 2,
+    total: 3,
+    error: "IDLE 连接已断开",
+    retryAt: "2026-11-25T03:00:00Z",
+  };
+  const { rerender } = render(
+    <SyncPanel account={account} idle={idle} onSaved={async () => {}} />,
+  );
+  expect(screen.getByText(/断线重连中 · 2\/3 个文件夹/)).toBeTruthy();
+  expect(screen.getByText(/IDLE 连接已断开 · 重试/)).toBeTruthy();
+  rerender(
+    <SyncPanel
+      account={account}
+      idle={{ ...idle, state: "unsupported", error: "服务器不支持 IMAP IDLE" }}
+      onSaved={async () => {}}
+    />,
+  );
+  expect(screen.getByText(/服务器不支持 IDLE · 2\/3 个文件夹/)).toBeTruthy();
+  expect(screen.queryByText(/IDLE 连接已断开/)).toBeNull();
+  rerender(
+    <SyncPanel
+      account={{ ...account, paused: true }}
+      idle={idle}
+      onSaved={async () => {}}
+    />,
+  );
+  expect(screen.getAllByText("邮箱已暂停").length).toBeGreaterThan(0);
+  expect(screen.queryByText(/IDLE 连接已断开/)).toBeNull();
+  await waitFor(() => expect(api).toHaveBeenCalledTimes(2));
 });

@@ -70,11 +70,24 @@ func (b *validityMailbox) Status(items []imap.StatusItem) (*imap.MailboxStatus, 
 	}
 	return s, e
 }
+
+// Only the local in-memory fixture adapts MOVE. Production never falls back
+// to COPY/EXPUNGE when the remote server lacks UID MOVE.
+func (b *validityMailbox) MoveMessages(uid bool, set *imap.SeqSet, dest string) error {
+	if err := b.CopyMessages(uid, set, dest); err != nil {
+		return err
+	}
+	if err := b.UpdateMessagesFlags(uid, set, imap.AddFlags, []string{imap.DeletedFlag}); err != nil {
+		return err
+	}
+	return b.Expunge()
+}
+
 func imapFixture(t *testing.T) (*App, domain.Account, secrets.Credentials, *memory.User) {
 	a, x, c, u, _ := imapFixtureGeneration(t)
 	return a, x, c, u
 }
-func imapFixtureGeneration(t *testing.T) (*App, domain.Account, secrets.Credentials, *memory.User, *atomic.Uint32) {
+func imapFixtureGeneration(t *testing.T, setup ...func(*server.Server)) (*App, domain.Account, secrets.Credentials, *memory.User, *atomic.Uint32) {
 	t.Helper()
 	fixtureOnce.Do(func() {
 		key, e := rsa.GenerateKey(rand.Reader, 2048)
@@ -114,6 +127,9 @@ func imapFixtureGeneration(t *testing.T) (*App, domain.Account, secrets.Credenti
 	validity := new(atomic.Uint32)
 	validity.Store(1)
 	srv := server.New(&validityBackend{Backend: backend, validity: validity})
+	for _, configure := range setup {
+		configure(srv)
+	}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(listener) }()
 	t.Cleanup(func() { srv.Close(); listener.Close(); <-done })

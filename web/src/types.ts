@@ -94,7 +94,7 @@ export type Operation = {
   error?: string;
 };
 export type Settings = {
-  quickSyncIntervalSeconds?: number;
+  incrementalMode?: "idle";
   fontSize: number;
   autoRead: boolean;
   cacheMiB: number;
@@ -110,8 +110,18 @@ export type Bootstrap = {
   jobs: Job[];
   operations: Operation[];
   settings: Settings;
+  idleStatus?: Record<string, IdleStatus>;
   running: Record<string, boolean>;
   total: number;
+};
+
+export type IdleStatus = {
+  state: string;
+  connected: number;
+  total: number;
+  error?: string;
+  retryAt?: string;
+  lastEventAt?: string;
 };
 
 export type SyncStatus = {

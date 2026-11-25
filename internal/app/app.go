@@ -19,6 +19,9 @@ import (
 )
 
 type App struct {
+	idleWatchers     map[string]*idleWatcher
+	idleAccounts     map[string]int
+	idlePending      map[string]idleDemand
 	notifyTimer      *time.Timer
 	lastNotification time.Time
 	taskCancels      map[string]context.CancelFunc
@@ -38,7 +41,7 @@ type App struct {
 
 func New(s *storage.Store, v *secrets.Vault) *App {
 	ctx, c := context.WithCancel(context.Background())
-	return &App{taskCancels: map[string]context.CancelFunc{}, delivery: map[string]bool{}, Store: s, Vault: v, ctx: ctx, cancel: c, running: map[string]bool{}, listeners: map[chan string]bool{}, contentGate: make(chan struct{}, 2), pending: map[string]bool{}, workerGate: make(chan struct{}, 2)}
+	return &App{idleWatchers: map[string]*idleWatcher{}, idleAccounts: map[string]int{}, idlePending: map[string]idleDemand{}, taskCancels: map[string]context.CancelFunc{}, delivery: map[string]bool{}, Store: s, Vault: v, ctx: ctx, cancel: c, running: map[string]bool{}, listeners: map[chan string]bool{}, contentGate: make(chan struct{}, 2), pending: map[string]bool{}, workerGate: make(chan struct{}, 2)}
 }
 func (a *App) Start() { // Any interrupted SMTP attempt must be confirmed manually, never replayed.
 	a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
@@ -72,12 +75,14 @@ func (a *App) Start() { // Any interrupted SMTP attempt must be confirmed manual
 		defer ticker.Stop()
 		maintenance := time.NewTicker(10 * time.Minute)
 		defer maintenance.Stop()
+		a.maintainIdle(time.Now().UTC())
 		a.scheduleSync(time.Now().UTC())
 		for {
 			select {
 			case <-a.ctx.Done():
 				return
 			case now := <-ticker.C:
+				a.maintainIdle(now.UTC())
 				a.scheduleSync(now.UTC())
 			case <-maintenance.C:
 				_ = a.Store.Checkpoint()
@@ -926,6 +931,9 @@ func (a *App) processOperations(x domain.Account, cred secrets.Credentials) {
 			}
 			return ops, nil
 		})
+		if removed {
+			a.queueMoveReconcile(x.ID)
+		}
 		a.Changed()
 	}
 }

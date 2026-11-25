@@ -3,7 +3,13 @@ import { Clock, RefreshCw, History, ChevronDown } from "lucide-react";
 import { api, time } from "./api";
 import { useBackgroundRefresh } from "./useBackgroundRefresh";
 import { Field, ErrorBox, Select } from "./components";
-import type { Account, SyncStatus, SyncTask, SyncCounters } from "./types";
+import type {
+  Account,
+  SyncStatus,
+  SyncTask,
+  SyncCounters,
+  IdleStatus,
+} from "./types";
 const names: Record<string, string> = {
   queued: "等待执行",
   running: "进行中",
@@ -24,14 +30,23 @@ const names: Record<string, string> = {
 };
 const stamp = (value?: string) =>
   value && !value.startsWith("0001-") ? time(value, true) : "尚无记录";
+const triggerNames: Record<string, string> = {
+  timer: "定时触发",
+  idle: "IDLE 事件触发",
+  startup: "启动补偿对齐",
+  operation: "邮件操作触发",
+  manual: "手动触发",
+};
 export function SyncPanel({
   account,
   status,
+  idle,
   onSaved,
   onBusyChange,
 }: {
   account: Account;
   status?: SyncStatus;
+  idle?: IdleStatus;
   onSaved: () => Promise<void>;
   onBusyChange?: (busy: boolean) => void;
 }) {
@@ -191,6 +206,37 @@ export function SyncPanel({
       </p>
       <dl className="sync-times">
         <div>
+          <dt>实时增量同步</dt>
+          <dd>
+            {account.paused
+              ? "邮箱已暂停"
+              : status?.errorKind === "authentication"
+                ? "认证失败，修改连接信息后重试"
+                : {
+                    listening: "IDLE 监听中",
+                    connecting: "正在连接",
+                    reconnecting: "断线重连中",
+                    unsupported: "服务器不支持 IDLE",
+                    authentication: "认证失败，修改连接信息后重试",
+                  }[idle?.state || ""] || "等待建立 IDLE 连接"}
+            {idle && !account.paused
+              ? ` · ${idle.connected}/${idle.total} 个文件夹`
+              : ""}
+          </dd>
+        </div>
+        {idle?.error && !account.paused && (
+          <div>
+            <dt>IDLE 提示</dt>
+            <dd className="danger">
+              {idle.error}
+              {idle.state === "reconnecting" && idle.retryAt
+                ? ` · 重试 ${stamp(idle.retryAt)}`
+                : ""}
+            </dd>
+          </div>
+        )}
+
+        <div>
           <dt>最近完整对齐</dt>
           <dd>{stamp(status?.lastFullSuccessAt)}</dd>
         </div>
@@ -322,7 +368,7 @@ export function SyncPanel({
             每类保留最近 5 次已结束任务，进行中与暂停任务另行保留。
             {logGroup === "full"
               ? "全历史同步归入完整对齐。"
-              : "快速同步只拉取新增邮件，不检查远端删除。"}
+              : "快速同步由 IDLE 新邮件事件或手动触发；删除与标记事件会触发完整对齐。"}
           </p>
           {!groupedTasks.length && (
             <p className="muted">
@@ -395,11 +441,7 @@ export function SyncPanel({
                 )}
                 <p className="muted">
                   {stamp(t.createdAt)} ·{" "}
-                  {t.trigger === "timer"
-                    ? "定时触发"
-                    : t.trigger === "manual"
-                      ? "手动触发"
-                      : "触发来源未记录"}
+                  {triggerNames[t.trigger || ""] || "触发来源未记录"}
                 </p>
                 {t.error && <p className="danger">{t.error}</p>}
                 {expanded === t.id && (

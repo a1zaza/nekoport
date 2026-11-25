@@ -9,6 +9,41 @@ import (
 	"github.com/a1zaza/nekoport/internal/storage"
 )
 
+func TestBootstrapAdvertisesIDLEAndIgnoresLegacyQuickInterval(t *testing.T) {
+	s, h := testServer(t)
+	s.App.Close()
+	cookie, csrf := loginTest(t, h)
+	s.App.Store.Update(func(st domain.State, _ storage.Index) ([]storage.Op, error) {
+		settings := st.Settings
+		settings.QuickSyncIntervalSeconds = 600
+		return []storage.Op{storage.Put("settings", "", settings)}, nil
+	})
+	w := req(h, "PUT", "/api/v1/settings", "http://localhost:8080", map[string]any{"fontSize": 16, "autoRead": true, "cacheMiB": 1024, "quickSyncIntervalSeconds": 30}, cookie, csrf)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	s.App.Store.Read(func(st domain.State, _ storage.Index) {
+		if st.Settings.FontSize != 16 || st.Settings.QuickSyncIntervalSeconds != 600 {
+			t.Fatal("legacy interval still changes settings")
+		}
+	})
+	w = req(h, "GET", "/api/v1/bootstrap", "", nil, cookie, "")
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(body["settings"], &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["incrementalMode"] != "idle" || settings["quickSyncIntervalSeconds"] != nil || body["idleStatus"] == nil {
+		t.Fatal("missing IDLE contract", w.Body.String())
+	}
+}
+
 func TestSyncTaskAPIScopeActionsAndValidation(t *testing.T) {
 	s, h := testServer(t)
 	s.App.Close()

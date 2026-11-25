@@ -1,4 +1,4 @@
-// A self-contained QA server serves built assets and mocks APIs only.
+// A self-contained QA server serves built assets or source and mocks APIs only.
 // It never opens real mailbox connections or starts the development environment.
 import { createServer } from "node:http";
 import { access, readFile, readdir } from "node:fs/promises";
@@ -6,8 +6,20 @@ import { resolve, extname, dirname, basename, relative } from "node:path";
 import { chromium } from "playwright-core";
 import assert from "node:assert/strict";
 const dist = resolve("dist");
+let sourceServer;
 const server = createServer(async (req, res) => {
   try {
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; frame-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
+    if (sourceServer) {
+      sourceServer.middlewares(req, res, () => {
+        res.writeHead(404);
+        res.end();
+      });
+      return;
+    }
     const path = new URL(req.url, "http://localhost").pathname;
     const file = resolve(dist, "." + (path === "/" ? "/index.html" : path));
     if (!file.startsWith(dist + "/")) throw Error();
@@ -20,10 +32,6 @@ const server = createServer(async (req, res) => {
         ".css": "text/css",
         ".svg": "image/svg+xml",
       }[extname(file)] || "application/octet-stream",
-    );
-    res.setHeader(
-      "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; frame-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     );
     res.end(body);
   } catch {
@@ -73,6 +81,15 @@ async function existingChromium() {
   );
 }
 const executablePath = await existingChromium();
+if (process.env.NEKOPORT_UI_SOURCE === "1" && !process.env.NEKOPORT_UI_URL) {
+  const { createServer: createViteServer } = await import("vite");
+  sourceServer = await createViteServer({
+    configFile: false,
+    root: resolve("."),
+    appType: "spa",
+    server: { middlewareMode: true, hmr: false, watch: null },
+  });
+}
 await new Promise((ok, fail) => {
   server.once("error", fail);
   server.listen(0, "127.0.0.1", ok);
@@ -85,6 +102,7 @@ const browser = await chromium
   })
   .catch(async (error) => {
     await new Promise((ok) => server.close(ok));
+    await sourceServer?.close();
     throw error;
   });
 const endpoint = {
@@ -169,6 +187,38 @@ try {
     errors.push(e.message);
     console.error("浏览器异常：", e.stack);
   });
+  async function checkAppFrame() {
+    const layout = await page.locator(".app-shell").evaluate((el) => {
+      const rect = el.getBoundingClientRect(),
+        style = getComputedStyle(el);
+      return {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        border: style.borderTopWidth,
+        color: style.borderTopColor,
+        radius: style.borderRadius,
+        shadow: style.boxShadow,
+        viewportWidth: innerWidth,
+        viewportHeight: innerHeight,
+        noOverflow:
+          document.documentElement.scrollWidth <= innerWidth &&
+          document.documentElement.scrollHeight <= innerHeight,
+      };
+    });
+    const mobile = layout.viewportWidth <= 720,
+      inset = mobile ? 0 : 20;
+    assert.equal(layout.x, inset);
+    assert.equal(layout.y, inset);
+    assert.equal(layout.width, layout.viewportWidth - inset * 2);
+    assert.equal(layout.height, layout.viewportHeight - inset * 2);
+    assert.equal(layout.border, mobile ? "0px" : "1px");
+    assert.equal(layout.radius, mobile ? "0px" : "10px");
+    if (!mobile) assert.equal(layout.color, "rgb(53, 53, 53)");
+    assert.equal(layout.shadow === "none", mobile);
+    assert.ok(layout.noOverflow, "outer frame causes page overflow");
+  }
   async function checkMoveMenu(flip = false) {
     await page
       .locator(".reader-toolbar")
@@ -479,6 +529,59 @@ try {
   );
   await page.getByRole("heading", { name: "邮件概览", exact: true }).waitFor();
   await page.getByRole("button", { name: /已配置邮箱/ }).waitFor();
+  await checkAppFrame();
+  // The overlay must remain inside the framed app on tablets and fill phones.
+  for (const width of [1100, 799, 721, 720, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await checkAppFrame();
+    await page
+      .getByRole("button", { name: "展开邮箱导航", exact: true })
+      .click();
+    await page.waitForFunction(() => {
+      const shell = document.querySelector(".app-shell"),
+        side = document.querySelector(".sidebar");
+      return (
+        Math.abs(
+          side.getBoundingClientRect().left -
+            shell.getBoundingClientRect().left -
+            parseFloat(getComputedStyle(shell).borderLeftWidth),
+        ) <= 1
+      );
+    });
+    const alignment = await page.evaluate(() => {
+      const shell = document
+        .querySelector(".app-shell")
+        .getBoundingClientRect();
+      const top = document.querySelector(".topbar").getBoundingClientRect();
+      const side = document.querySelector(".sidebar").getBoundingClientRect();
+      const mask = document
+        .querySelector(".sidebar-mask")
+        .getBoundingClientRect();
+      return {
+        fits:
+          side.left >= shell.left - 1 &&
+          side.bottom <= shell.bottom + 1 &&
+          mask.left >= shell.left - 1 &&
+          mask.right <= shell.right + 1 &&
+          mask.bottom <= shell.bottom + 1,
+        aligned:
+          Math.abs(side.top - top.bottom) <= 1 &&
+          Math.abs(mask.top - top.bottom) <= 1,
+      };
+    });
+    assert.ok(
+      alignment.fits && alignment.aligned,
+      `navigation escapes outer frame at ${width}px`,
+    );
+    if (width === 1100)
+      await page.screenshot({ path: "/tmp/nekoport-framed-tablet.png" });
+    const mask = page.getByRole("button", { name: "关闭导航", exact: true });
+    const bounds = await mask.boundingBox();
+    await mask.click({ position: { x: bounds.width - 12, y: 12 } });
+    await page.locator(".sidebar.open").waitFor({ state: "hidden" });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await checkAppFrame();
   const workAccount = page
     .locator(".account-navigation")
     .getByRole("button", { name: "工作邮箱", exact: true });
@@ -1371,6 +1474,17 @@ try {
   await page
     .getByText("账户已更新，请使用新的账号信息重新登录。", { exact: true })
     .waitFor();
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const login = await page.locator(".login-layout").boundingBox();
+    assert.equal(login.x, 0);
+    assert.equal(login.y, 0);
+    assert.equal(login.width, viewport.width);
+    assert.equal(await page.locator(".app-shell").count(), 0);
+  }
   authenticated = true;
   emptyOverview = true;
   await page.reload();
@@ -1420,4 +1534,5 @@ try {
 } finally {
   await browser.close();
   await new Promise((ok) => server.close(ok));
+  await sourceServer?.close();
 }

@@ -92,9 +92,3 @@ func (a Account) ReconcileMinutes() int {
 	return a.ReconcileIntervalMinutes
 }
 func (a Account) ReconcileOn() bool { return a.ReconcileEnabled == nil || *a.ReconcileEnabled }
-func (s Settings) QuickSeconds() int {
-	if s.QuickSyncIntervalSeconds < 30 {
-		return 60
-	}
-	return s.QuickSyncIntervalSeconds
-}

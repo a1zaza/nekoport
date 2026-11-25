@@ -299,7 +299,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		out["drafts"] = drafts
 		out["jobs"] = jobs
 		out["operations"] = ops
-		out["settings"] = map[string]any{"fontSize": st.Settings.FontSize, "autoRead": st.Settings.AutoRead, "cacheMiB": st.Settings.CacheMiB, "quickSyncIntervalSeconds": st.Settings.QuickSeconds()}
+		out["settings"] = map[string]any{"fontSize": st.Settings.FontSize, "autoRead": st.Settings.AutoRead, "cacheMiB": st.Settings.CacheMiB, "incrementalMode": "idle"}
 		tasks := []domain.SyncTask{}
 		for _, t := range st.SyncTasks {
 			if t.Active() || t.State == "paused" {
@@ -316,10 +316,12 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	})
 	out["storage"] = map[string]bool{"writable": s.App.Store.Writable()}
 	out["running"] = s.App.Running()
+	out["idleStatus"] = s.App.IdleStatuses()
 	JSON(w, 200, out)
 }
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
+		// Accept legacy clients, but incremental delivery is always IDLE-driven.
 		QuickSyncIntervalSeconds *int `json:"quickSyncIntervalSeconds"`
 		FontSize                 int  `json:"fontSize"`
 		AutoRead                 bool `json:"autoRead"`
@@ -329,19 +331,12 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		failure(w, e)
 		return
 	}
-	if in.QuickSyncIntervalSeconds != nil && (*in.QuickSyncIntervalSeconds < 30 || *in.QuickSyncIntervalSeconds > 3600) {
-		failure(w, errors.New("快速同步间隔范围为 30–3600 秒"))
-		return
-	}
 	if in.FontSize < 12 || in.FontSize > 24 || in.CacheMiB < 64 || in.CacheMiB > 102400 {
 		failure(w, errors.New("设置范围无效"))
 		return
 	}
 	e := s.App.Store.Update(func(st domain.State, _ storage.Index) ([]storage.Op, error) {
 		v := st.Settings
-		if in.QuickSyncIntervalSeconds != nil {
-			v.QuickSyncIntervalSeconds = *in.QuickSyncIntervalSeconds
-		}
 		v.FontSize = in.FontSize
 		v.AutoRead = in.AutoRead
 		v.CacheMiB = in.CacheMiB
