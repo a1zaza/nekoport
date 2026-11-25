@@ -1,0 +1,8 @@
+字体资源说明
+
+Consolas Regular / consolas.woff
+LXGW ZhenKai（霞鹜臻楷）Regular / lxgwzk.woff2
+
+字体文件按用户指定从 v2way 项目原样复用，保留文件内原始版权信息。
+霞鹜臻楷的 SIL Open Font License 1.1 文本见 LXGW-ZhenKai-OFL.txt。
+Consolas 保留其原有授权，不适用应用代码或霞鹜臻楷的许可证。

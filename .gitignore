@@ -1,0 +1,14 @@
+.data/
+data/
+secrets/
+backups/
+bin/
+web/node_modules/
+web/dist/*
+!web/dist/.keep
+coverage/
+*.log
+*.tmp
+.env
+.env.*
+!*.example

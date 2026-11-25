@@ -1,0 +1,140 @@
+name: 发布 nekoport 镜像
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ghcr-publish-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    if: github.ref == 'refs/heads/main'
+    name: 构建 ${{ matrix.arch }} 镜像
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: 生成镜像地址
+        id: image
+        shell: bash
+        run: |
+          printf 'name=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 初始化构建器
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: 登录 GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并按 Digest 推送镜像
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./deploy/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.title=nekoport
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=nekoport-${{ matrix.arch }}
+          cache-to: type=gha,scope=nekoport-${{ matrix.arch }},mode=max
+
+      - name: 保存镜像 Digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digests/$ARCH.txt"
+
+      - name: 上传镜像 Digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifest:
+    if: github.ref == 'refs/heads/main'
+    needs: build-and-push
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - name: 下载各架构 Digest
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digests-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: 生成镜像地址
+        id: image
+        shell: bash
+        run: |
+          printf 'name=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 初始化构建器
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: 登录 GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 合并并发布多架构 latest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          sources=()
+          for arch in amd64 arm64; do
+            digest=$(cat "$RUNNER_TEMP/digests/$arch.txt")
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            sources+=("$IMAGE@$digest")
+          done
+          docker buildx imagetools create --tag "$IMAGE:latest" "${sources[@]}"
+          docker buildx imagetools inspect "$IMAGE:latest" --raw > "$RUNNER_TEMP/manifest.json"
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | unique | sort == ["amd64", "arm64"]' "$RUNNER_TEMP/manifest.json"
+          {
+            printf '镜像：`%s:latest`\n\n' "$IMAGE"
+            printf '源码：`%s`\n\n' "$GITHUB_SHA"
+            printf '架构：`linux/amd64`、`linux/arm64`（原生 Runner 构建）\n\n'
+            printf '```text\n'
+            docker buildx imagetools inspect "$IMAGE:latest"
+            printf '\n```\n\n'
+            printf '首次发布后，请核对包可见性与拉取权限；仅在选择公开发布时验证匿名拉取。\n'
+          } >> "$GITHUB_STEP_SUMMARY"
