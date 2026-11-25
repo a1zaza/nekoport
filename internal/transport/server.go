@@ -131,10 +131,6 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; frame-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
-		if !s.hostAllowed(r.Host) {
-			JSON(w, 403, map[string]string{"message": "请求主机不受信任"})
-			return
-		}
 		if r.Method != "GET" && r.Method != "HEAD" {
 			if !s.originAllowed(r) {
 				JSON(w, 403, map[string]string{"message": "请求来源不受信任"})
@@ -146,22 +142,6 @@ func (s *Server) Handler() http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
-}
-func (s *Server) hostAllowed(host string) bool {
-	h, _, e := net.SplitHostPort(host)
-	if e != nil {
-		h = host
-	}
-	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
-		return true
-	}
-	for _, origin := range s.Origins {
-		u, e := url.Parse(origin)
-		if e == nil && u.Host == host {
-			return true
-		}
-	}
-	return false
 }
 func (s *Server) originAllowed(r *http.Request) bool {
 	origin := r.Header.Get("Origin")

@@ -87,13 +87,71 @@ func TestSessionCSRFAndRedaction(t *testing.T) {
 		t.Fatal("logout did not revoke")
 	}
 }
-func TestRejectDNSRebindingHost(t *testing.T) {
-	_, h := testServer(t)
-	r := httptest.NewRequest("GET", "http://evil.test/api/v1/session", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 403 {
-		t.Fatal("untrusted host allowed")
+func TestCustomHostsKeepAuthenticationOriginAndCSRFProtection(t *testing.T) {
+	for _, base := range []string{"http://192.168.42.7:9090", "https://mail.example.test", "https://mail.example.test:8443", "http://[fd00::1234]:8080"} {
+		t.Run(base, func(t *testing.T) {
+			_, handler := testServer(t)
+			call := func(method, path, origin string, body any, cookie *http.Cookie, csrf string) *httptest.ResponseRecorder {
+				var data bytes.Buffer
+				if body != nil {
+					if err := json.NewEncoder(&data).Encode(body); err != nil {
+						t.Fatal(err)
+					}
+				}
+				request := httptest.NewRequest(method, base+path, &data)
+				if origin != "" {
+					request.Header.Set("Origin", origin)
+				}
+				if cookie != nil {
+					request.AddCookie(cookie)
+				}
+				if csrf != "" {
+					request.Header.Set("X-CSRF-Token", csrf)
+				}
+				result := httptest.NewRecorder()
+				handler.ServeHTTP(result, request)
+				return result
+			}
+			if result := call("GET", "/api/v1/session", "", nil, nil, ""); result.Code != 200 {
+				t.Fatal("custom host blocked", result.Code)
+			}
+			if result := call("GET", "/health/ready", "", nil, nil, ""); result.Code != 200 {
+				t.Fatal("health blocked", result.Code)
+			}
+			if result := call("GET", "/api/v1/bootstrap", "", nil, nil, ""); result.Code != 401 {
+				t.Fatal("authentication bypassed", result.Code)
+			}
+			credentials := map[string]string{"username": "test-user", "password": "test-password"}
+			for _, origin := range []string{"", "http://other.example.test", "null"} {
+				if result := call("POST", "/api/v1/login", origin, credentials, nil, ""); result.Code != 403 {
+					t.Fatal("untrusted origin accepted", result.Code)
+				}
+			}
+			result := call("POST", "/api/v1/login", base, credentials, nil, "")
+			if result.Code != 200 {
+				t.Fatal("same-origin login rejected", result.Code)
+			}
+			cookies := result.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatal("session cookie missing")
+			}
+			var login struct {
+				CSRF string `json:"csrf"`
+			}
+			if err := json.Unmarshal(result.Body.Bytes(), &login); err != nil {
+				t.Fatal(err)
+			}
+			settings := map[string]any{"fontSize": 16, "autoRead": true, "cacheMiB": 1024}
+			if result = call("PUT", "/api/v1/settings", base, settings, cookies[0], ""); result.Code != 403 {
+				t.Fatal("CSRF bypassed", result.Code)
+			}
+			if result = call("PUT", "/api/v1/settings", "http://other.example.test", settings, cookies[0], login.CSRF); result.Code != 403 {
+				t.Fatal("cross-origin write accepted", result.Code)
+			}
+			if result = call("PUT", "/api/v1/settings", base, settings, cookies[0], login.CSRF); result.Code != 200 {
+				t.Fatal("same-origin authenticated write rejected", result.Code)
+			}
+		})
 	}
 }
 func TestCursorAndChineseSearch(t *testing.T) {
