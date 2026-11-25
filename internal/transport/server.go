@@ -568,8 +568,20 @@ func (s *Server) retryOperation(w http.ResponseWriter, r *http.Request) {
 }
 
 type draftInput struct {
-	domain.Draft
-	Body string `json:"body"`
+	ID        string `json:"id"`
+	AccountID string `json:"accountId"`
+	To        string `json:"to"`
+	CC        string `json:"cc"`
+	BCC       string `json:"bcc"`
+	Subject   string `json:"subject"`
+	InReplyTo string `json:"inReplyTo"`
+	Revision  int    `json:"revision"`
+	Body      string `json:"body"`
+	// Older clients submit the full response object, including updatedAt: "".
+	// Accept these read-only fields without parsing or trusting their values.
+	BodyID      json.RawMessage `json:"bodyId"`
+	Attachments json.RawMessage `json:"attachments"`
+	UpdatedAt   json.RawMessage `json:"updatedAt"`
 }
 
 func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
@@ -595,7 +607,10 @@ func (s *Server) saveDraft(w http.ResponseWriter, r *http.Request) {
 	if r.PathValue("id") != "" {
 		in.ID = r.PathValue("id")
 	}
-	d, e := s.App.SaveDraft(in.Draft, in.Body)
+	d, e := s.App.SaveDraft(domain.Draft{
+		ID: in.ID, AccountID: in.AccountID, To: in.To, CC: in.CC, BCC: in.BCC,
+		Subject: in.Subject, InReplyTo: in.InReplyTo, Revision: in.Revision,
+	}, in.Body)
 	if e != nil {
 		failure(w, e)
 		return

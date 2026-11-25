@@ -76,7 +76,16 @@ export function Compose({
         const d = await api<Draft>(
           snapshot.draft.id ? `/drafts/${snapshot.draft.id}` : "/drafts",
           snapshot.draft.id ? "PUT" : "POST",
-          { ...snapshot.draft, body: snapshot.body },
+          {
+            accountId: snapshot.draft.accountId,
+            to: snapshot.draft.to,
+            cc: snapshot.draft.cc,
+            bcc: snapshot.draft.bcc,
+            subject: snapshot.draft.subject,
+            inReplyTo: snapshot.draft.inReplyTo,
+            revision: snapshot.draft.revision,
+            body: snapshot.body,
+          },
         );
         saved.current = n;
         const next = {

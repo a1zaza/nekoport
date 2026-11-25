@@ -38,6 +38,38 @@ const draft: Draft = {
   updatedAt: "",
 };
 describe("草稿与发送的并发边界", () => {
+  it("首次保存只发送可编辑字段，不提交空时间及服务端元数据", async () => {
+    vi.mocked(api).mockResolvedValue({ ...draft, revision: 1 });
+    render(
+      <Compose
+        initial={{
+          draft: { ...draft, id: "", bodyId: "", revision: 0 },
+          body: "12341",
+        }}
+        accounts={[account]}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "保存草稿" }));
+    await waitFor(() => expect(api).toHaveBeenCalledOnce());
+    const [path, method, payload] = vi.mocked(api).mock.calls[0];
+    expect(path).toBe("/drafts");
+    expect(method).toBe("POST");
+    expect(payload).toEqual({
+      accountId: "a",
+      to: "to@example.test",
+      cc: "",
+      bcc: "",
+      subject: "主题",
+      inReplyTo: undefined,
+      revision: 0,
+      body: "12341",
+    });
+    for (const field of ["id", "updatedAt", "bodyId", "attachments"])
+      expect(payload).not.toHaveProperty(field);
+  });
   it("等待旧保存完成后，先保存最新正文再发送", async () => {
     let release!: (d: Draft) => void;
     const requests: { path: string; value: any }[] = [];
