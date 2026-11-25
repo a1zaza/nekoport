@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -45,7 +44,7 @@ func run(args []string) error {
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	data := f.String("data", ".data", "数据目录")
-	key := f.String("master-key-file", "", "只读主密钥文件路径")
+	key := f.String("master-key-file", "", "主密钥文件路径（init/serve 默认数据目录下 master.key，keygen 需显式指定）")
 	listen := f.String("listen", "127.0.0.1:8080", "HTTP 监听地址")
 	username := f.String("username", "", "应用访问用户名")
 	stdin := f.Bool("password-stdin", false, "从 stdin 读取密码")
@@ -133,6 +132,9 @@ func run(args []string) error {
 		if e != nil {
 			return e
 		}
+		if _, e = openCredentialVault(s, *key); e != nil {
+			return e
+		}
 		e = s.Update(func(st domain.State, _ storage.Index) ([]storage.Op, error) {
 			v := st.Settings
 			v.Username = *username
@@ -144,18 +146,16 @@ func run(args []string) error {
 		}
 		return e
 	}
-	var initialized bool
-	s.Read(func(st domain.State, _ storage.Index) { initialized = st.Settings.Username != "" })
-	if !initialized {
-		return errors.New("尚未初始化，请先运行 init -data <目录> -username <用户名>")
-	}
-	if *key == "" {
-		return errors.New("必须提供 -master-key-file")
-	}
-	v, e := secrets.Open(filepath.Join(s.Root(), "secrets.json"), *key)
+	v, e := openCredentialVault(s, *key)
 	if e != nil {
 		return e
 	}
+	listener, e := listenAndBootstrap(s, *listen, os.Stdout)
+	if e != nil {
+		return e
+	}
+	defer listener.Close()
+
 	a := app.New(s, v)
 	a.Start()
 	defer a.Close()
@@ -168,7 +168,7 @@ func run(args []string) error {
 	defer cancel()
 	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10, BaseContext: func(net.Listener) context.Context { return ctx }}
 	done := make(chan error, 1)
-	go func() { log.Printf("nekoport 监听 %s", *listen); done <- server.ListenAndServe() }()
+	go func() { log.Printf("nekoport 监听 %s", listener.Addr()); done <- server.Serve(listener) }()
 	select {
 	case e := <-done:
 		if e != http.ErrServerClosed {

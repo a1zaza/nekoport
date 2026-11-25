@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -25,35 +26,127 @@ type Vault struct {
 	entries map[string]string
 }
 
+var ErrKeyExists = errors.New("密钥已存在，拒绝覆盖")
+
+// Generate publishes a complete, synced key without replacing an existing key.
 func Generate(path string) error {
-	if _, e := os.Stat(path); e == nil {
-		return errors.New("密钥已存在，拒绝覆盖")
+	if _, err := os.Lstat(path); err == nil {
+		return ErrKeyExists
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	b := make([]byte, 32)
-	if _, e := rand.Read(b); e != nil {
-		return e
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
 	}
-	if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
-		return e
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
 	}
-	f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return e
+	file, err := os.CreateTemp(dir, ".master-key-*")
+	if err != nil {
+		return err
 	}
-	defer f.Close()
-	if _, e = f.Write([]byte(base64.StdEncoding.EncodeToString(b) + "\n")); e != nil {
-		return e
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if _, err = file.WriteString(base64.StdEncoding.EncodeToString(key) + "\n"); err != nil {
+		return err
 	}
-	return f.Sync()
+	if err = file.Sync(); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	// Hard-link creation is atomic and fails if any file already occupies path.
+	if err = os.Link(file.Name(), path); os.IsExist(err) {
+		return ErrKeyExists
+	} else if err != nil {
+		return err
+	}
+	if err = os.Remove(file.Name()); err != nil {
+		return err
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
-func Open(path, keyfile string) (*Vault, error) {
-	b, e := os.ReadFile(keyfile)
-	if e != nil {
+
+// EnsureKey only initializes a missing key when there are no saved credentials.
+// A lost key must never be replaced in front of existing encrypted entries.
+func EnsureKey(vaultPath, keyfile string) error {
+	if _, err := os.Lstat(keyfile); err == nil {
+		_, err = readKey(keyfile)
+		return err
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	b, err := os.ReadFile(vaultPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		var wrapper struct {
+			Version int               `json:"schemaVersion"`
+			Entries map[string]string `json:"entries"`
+		}
+		if json.Unmarshal(b, &wrapper) != nil || wrapper.Version != 1 || wrapper.Entries == nil {
+			return errors.New("主密钥缺失且凭据文件无效，请先恢复数据，不会生成替换密钥")
+		}
+		if len(wrapper.Entries) > 0 {
+			return errors.New("主密钥缺失且已有加密凭据，请恢复原 master.key，不会生成替换密钥")
+		}
+	}
+	if err = Generate(keyfile); errors.Is(err, ErrKeyExists) {
+		_, err = readKey(keyfile)
+	}
+	return err
+}
+
+func readKey(keyfile string) ([]byte, error) {
+	info, err := os.Stat(keyfile)
+	if err != nil {
 		return nil, errors.New("无法读取主密钥文件")
 	}
-	key, e := base64.StdEncoding.DecodeString(stringTrim(b))
-	if e != nil || len(key) != 32 {
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("主密钥必须是普通文件")
+	}
+	if info.Size() > 256 {
 		return nil, errors.New("主密钥必须是 base64 编码的 32 字节密钥")
+	}
+	file, err := os.Open(keyfile)
+	if err != nil {
+		return nil, errors.New("无法读取主密钥文件")
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return nil, errors.New("无法读取主密钥文件")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("主密钥必须是普通文件")
+	}
+	if info.Size() > 256 {
+		return nil, errors.New("主密钥必须是 base64 编码的 32 字节密钥")
+	}
+	b, err := io.ReadAll(io.LimitReader(file, 256))
+	if err != nil {
+		return nil, errors.New("无法读取主密钥文件")
+	}
+	key, err := base64.StdEncoding.DecodeString(stringTrim(b))
+	if err != nil || len(key) != 32 {
+		return nil, errors.New("主密钥必须是 base64 编码的 32 字节密钥")
+	}
+	return key, nil
+}
+
+func Open(path, keyfile string) (*Vault, error) {
+	key, e := readKey(keyfile)
+	if e != nil {
+		return nil, e
 	}
 	block, e := aes.NewCipher(key)
 	if e != nil {
@@ -64,7 +157,7 @@ func Open(path, keyfile string) (*Vault, error) {
 		return nil, e
 	}
 	v := &Vault{path: path, aead: a, entries: map[string]string{}}
-	b, e = os.ReadFile(path)
+	b, e := os.ReadFile(path)
 	if e != nil && !os.IsNotExist(e) {
 		return nil, e
 	}

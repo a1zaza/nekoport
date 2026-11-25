@@ -1842,7 +1842,7 @@ function Login({
           <div className="login-note">
             <ShieldCheck size={14} />
             <span>
-              使用初始化时设置的应用账号登录，登录后可添加并管理邮箱。
+              首次启动生成的默认账号和密码可在服务控制台查看，登录后可添加并管理邮箱。
             </span>
           </div>
         </form>

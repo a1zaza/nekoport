@@ -9,12 +9,6 @@ services:
       - "127.0.0.1:${NEKOPORT_PORT:-8080}:8080"
     volumes:
       - ./data:/var/lib/nekoport
-      - type: bind
-        source: ./secrets/master.key
-        target: /run/secrets/nekoport-master-key
-        read_only: true
-        bind:
-          create_host_path: false
     environment:
       TZ: Asia/Shanghai
     stop_grace_period: 30s

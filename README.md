@@ -46,8 +46,8 @@ Go 后端 + React 中文界面，前端资源嵌入单个 Go 程序。采用深�
 git clone https://github.com/a1zaza/nekoport.git
 cd nekoport
 
-mkdir -p data secrets
-chmod 700 data secrets
+mkdir -p data
+chmod 700 data
 
 docker compose pull
 ```
@@ -68,20 +68,23 @@ docker compose build
 
 </details>
 
-### 2. 生成主密钥
+### 2. 启动并查看初始账号
 
 ```bash
-docker run --rm --user 1000:1000 \
-  -v "$PWD/secrets:/key-output" \
-  "$(docker compose config --images)" \
-  keygen -master-key-file /key-output/master.key
+docker compose up -d
+docker compose logs nekoport
 ```
 
-命令使用 Compose 中的实际镜像名，只挂载密钥输出目录。主密钥必须先生成，再执行初始化；不要提前创建空密钥文件。已有密钥不会被覆盖。
+全新数据目录首次启动时，程序会自动生成 `master.key`（权限 `0600`），创建用户名 **`admin`** 和一个安全随机密码，并仅在该次启动的控制台输出登录信息。应用不生成明文账号密码文件，只持久化用户名和密码哈希。
 
-### 3. 初始化登录账号
+打开 **<http://127.0.0.1:8080>**，使用控制台中的账号密码登录，建议随后在“设置与同步 → 账户安全”修改密码。重启沿用已有账号，不重新生成或输出密码；已有数据或账号配置异常时也不会自动重置。
 
-将 `myname` 换成你希望使用的平台登录用户名，按提示设置密码：
+登录后添加邮箱，填写 IMAP / SMTP 主机、端口、TLS 和登录信息。容器中的 `localhost` 指容器本身，请使用容器实际可达的邮件服务器地址。
+
+<details>
+<summary>希望自行设置首次登录用户名和密码（可选）</summary>
+
+在首次启动服务之前执行以下命令，将 `myname` 替换为你的用户名，按提示设置密码：
 
 ```bash
 docker compose run --rm --no-deps nekoport init \
@@ -89,15 +92,9 @@ docker compose run --rm --no-deps nekoport init \
   -username myname
 ```
 
-平台登录账号与邮箱服务商账号分别配置，没有默认登录密码。
+手动初始化后，服务沿用你设置的账号，控制台不会另行生成默认密码。平台登录账号与邮箱服务商账号分别配置；`init` 不覆盖已有账号。
 
-### 4. 启动
-
-```bash
-docker compose up -d
-```
-
-打开 **<http://127.0.0.1:8080>**，登录后添加邮箱，填写 IMAP / SMTP 主机、端口、TLS 和登录信息。容器中的 `localhost` 指容器本身，请使用容器实际可达的邮件服务器地址。
+</details>
 
 ## 配置
 
@@ -117,14 +114,29 @@ NEKOPORT_IMAGE=ghcr.io/a1zaza/nekoport:latest
 
 ### 数据与主密钥
 
-| 宿主路径               | 内容                                           |
-| ---------------------- | ---------------------------------------------- |
-| `./data`               | 邮件索引、状态、正文及附件缓存、草稿和任务日志 |
-| `./secrets/master.key` | 解密邮箱凭据的主密钥，只读挂载到容器           |
+只需挂载一个目录：`./data:/var/lib/nekoport`。
 
-**数据与主密钥请分别备份。** 丢失密钥后无法解密原邮箱凭据，替换镜像或重建容器都不应重新生成密钥。
+| 宿主路径            | 内容                                               |
+| ------------------- | -------------------------------------------------- |
+| `./data`            | 邮件索引、状态、正文及附件缓存、草稿和任务日志     |
+| `./data/master.key` | 解密邮箱凭据的主密钥，缺失且没有已存凭据时自动生成 |
 
-升级前正常停止服务，完整备份数据、主密钥和旧镜像 digest。不要在运行时手工修改 JSON / JSONL，或只复制部分文件；恢复规则见 [开发与维护文档](docs/development.md#数据布局与恢复)。
+`init` 和 `serve` 默认使用各自 `-data` 目录下的 `master.key`，也可用 `-master-key-file` 显式指定其他位置。密钥为空、无效或丢失但已有加密凭据时会明确报错，不会用新密钥替换。
+
+**请完整备份 `./data`，其中包含主密钥。** 数据目录及备份都应限制为个人访问；丢失密钥后无法解密原邮箱凭据，替换镜像或重建容器不应重新生成已有密钥。
+
+<details>
+<summary>从旧的 data + secrets 双挂载部署迁移</summary>
+
+1. 停止旧容器，保留原数据和密钥备份。
+2. 将原 `./secrets/master.key` 原样复制到 `./data/master.key`，权限设为 `0600`，所有者需匹配容器运行用户。若目标文件已存在，先确认是否为同一密钥，禁止直接覆盖。
+3. 更新 Compose，保留数据目录挂载，移除原独立密钥挂载，然后启动新镜像。
+
+有已存邮箱凭据时必须使用原密钥；不能通过删除密钥让应用重新生成来完成迁移。
+
+</details>
+
+升级前正常停止服务，完整备份数据目录（含 `master.key`）和旧镜像 digest。不要在运行时手工修改 JSON / JSONL，或只复制部分文件；恢复规则见 [开发与维护文档](docs/development.md#数据布局与恢复)。
 
 ## 同步与发送说明
 
