@@ -1477,6 +1477,25 @@ fieldset {
   border-bottom: 1px solid #2e2e32;
   padding: 13px 0;
 }
+.operation-row > div:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.operation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  gap: 8px;
+}
+@media (max-width: 720px) {
+  .operation-row {
+    flex-wrap: wrap;
+  }
+  .operation-actions {
+    justify-content: flex-start;
+  }
+}
 .operation-row strong {
   font-size: 12px;
   font-weight: 400;

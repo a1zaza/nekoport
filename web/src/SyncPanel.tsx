@@ -44,6 +44,7 @@ const reasonLabel = (reason: string) =>
     "folder-unavailable": "目录存在性检查",
     "send:sent": "发送后更新已发送目录",
     "operation:move": "移动两端更新",
+    "operation:manual-check": "手动核对失败操作",
     startup: "启动恢复",
   })[reason] || "增量事件";
 const triggerNames: Record<string, string> = {

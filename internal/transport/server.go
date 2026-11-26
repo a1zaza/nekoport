@@ -115,6 +115,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/messages/{id}/attachments/{attachment}", s.auth(s.messageAttachment))
 	mux.HandleFunc("POST /api/v1/message-operations", s.auth(s.operation))
 	mux.HandleFunc("POST /api/v1/operations/{id}/retry", s.auth(s.retryOperation))
+	mux.HandleFunc("DELETE /api/v1/operations", s.auth(s.clearOperations))
+	mux.HandleFunc("DELETE /api/v1/operations/{id}", s.auth(s.clearOperations))
+	mux.HandleFunc("POST /api/v1/operations/{id}/reconcile", s.auth(s.reconcileOperation))
 	mux.HandleFunc("GET /api/v1/drafts/{id}", s.auth(s.draft))
 	mux.HandleFunc("POST /api/v1/drafts", s.auth(s.saveDraft))
 	mux.HandleFunc("PUT /api/v1/drafts/{id}", s.auth(s.saveDraft))
@@ -603,6 +606,49 @@ func (s *Server) retryOperation(w http.ResponseWriter, r *http.Request) {
 	s.App.Changed()
 	s.App.Trigger(account)
 	JSON(w, 200, map[string]bool{"ok": true})
+}
+
+// Clearing is acknowledgement of a terminal error, never cancellation of an
+// in-flight operation or reversal/replay of an IMAP command.
+func (s *Server) clearOperations(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	removed := 0
+	err := s.App.Store.Update(func(st domain.State, _ storage.Index) ([]storage.Op, error) {
+		if id != "" {
+			o, exists := st.Operations[id]
+			if !exists {
+				return nil, nil
+			}
+			if o.State != "failed" {
+				return nil, errors.New("只能清除失败记录，等待或执行中的任务不能清除")
+			}
+			removed = 1
+			return []storage.Op{storage.Del("operations", id)}, nil
+		}
+		var ops []storage.Op
+		for key, o := range st.Operations {
+			if o.State == "failed" {
+				ops = append(ops, storage.Del("operations", key))
+				removed++
+			}
+		}
+		return ops, nil
+	})
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	if removed > 0 {
+		s.App.Changed()
+	}
+	JSON(w, 200, map[string]any{"ok": true, "removed": removed})
+}
+func (s *Server) reconcileOperation(w http.ResponseWriter, r *http.Request) {
+	if err := s.App.ReconcileOperation(r.PathValue("id")); err != nil {
+		failure(w, err)
+		return
+	}
+	JSON(w, 202, map[string]bool{"queued": true})
 }
 
 type draftInput struct {

@@ -33,7 +33,6 @@ import {
   Eye,
   ShieldCheck,
   Server,
-  Clock,
   SlidersHorizontal,
 } from "lucide-react";
 import { api, download, setCSRF, size, time, isAbortError } from "./api";
@@ -45,6 +44,7 @@ import { MailFrame } from "./MailFrame";
 import { Overview } from "./Overview";
 import { AccountSecurity } from "./AccountSecurity";
 import { SyncPanel } from "./SyncPanel";
+import { OperationPanel } from "./OperationPanel";
 import { useBackgroundRefresh } from "./useBackgroundRefresh";
 import type {
   Account,
@@ -2163,52 +2163,11 @@ function SettingsPage({
             </button>
           </form>
         </section>
-        <section className="preference-section">
-          <h2>
-            <Clock size={17} />
-            未完成的邮件操作
-          </h2>
-          <p className="muted">
-            移动、删除先在本地移出列表，后台再提交；目标目录等待服务器确认。失败时恢复显示；结果不确定的移动请先同步核对，不会自动重放。
-          </p>
-          {data.operations.length ? (
-            data.operations.map((o) => (
-              <div className="operation-row" key={o.id}>
-                <div>
-                  <strong>
-                    {o.kind === "seen"
-                      ? "已读状态"
-                      : o.kind === "starred"
-                        ? "星标状态"
-                        : "移动邮件"}{" "}
-                    ·{" "}
-                    {o.state === "queued"
-                      ? "等待同步"
-                      : o.state === "running"
-                        ? "执行中"
-                        : "失败"}
-                  </strong>
-                  <p className="danger">{o.error}</p>
-                </div>
-                {o.state === "failed" &&
-                  ["seen", "starred"].includes(o.kind) && (
-                    <button
-                      className="secondary small"
-                      onClick={() =>
-                        void api(`/operations/${o.id}/retry`, "POST")
-                          .then(onSaved)
-                          .catch((e) => onError(e.message))
-                      }
-                    >
-                      重试
-                    </button>
-                  )}
-              </div>
-            ))
-          ) : (
-            <p className="muted">没有未完成的操作。</p>
-          )}
-        </section>
+        <OperationPanel
+          operations={data.operations}
+          onSaved={onSaved}
+          onError={onError}
+        />
         <section className="preference-section about">
           <div>
             <h2>nekoport</h2>

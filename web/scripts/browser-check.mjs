@@ -161,6 +161,8 @@ let listMessages = null;
 let rejectOperation = false;
 let holdOperation = null;
 let holdBootstrap = null;
+let operationRecords = [];
+const recordActions = [];
 let removeOperationTargets = false;
 let failedBootstrap = 0,
   failedMessages = 0,
@@ -386,7 +388,7 @@ try {
             createdAt: new Date().toISOString(),
           },
         ],
-        operations: [],
+        operations: operationRecords,
         settings: { fontSize: 15, autoRead: true, cacheMiB: 1024 },
         running: {},
         total: 1,
@@ -406,6 +408,15 @@ try {
           (message) => !input.ids.includes(message.id),
         );
       result = { ok: true };
+    } else if (path.includes("/operations/")) {
+      recordActions.push({ path, method: req.method() });
+      if (req.method() === "DELETE")
+        operationRecords = operationRecords.filter(
+          (o) => o.id !== path.split("/").at(-1),
+        );
+    } else if (path.endsWith("/operations") && req.method() === "DELETE") {
+      recordActions.push({ path, method: req.method() });
+      operationRecords = operationRecords.filter((o) => o.state !== "failed");
     } else if (path.endsWith("/sync-tasks")) {
       if (req.method() === "POST") {
         const input = req.postDataJSON();
@@ -1217,6 +1228,95 @@ try {
     await page.locator(".account-card .account-sync-panel").count(),
     0,
   );
+  operationRecords = [
+    {
+      id: "failed-move",
+      accountId: "a",
+      messageId: "m",
+      kind: "move",
+      state: "failed",
+      error: "模拟移动失败",
+    },
+    {
+      id: "failed-seen",
+      accountId: "a",
+      messageId: "m",
+      kind: "seen",
+      state: "failed",
+      error: "模拟标记失败",
+    },
+    {
+      id: "failed-trash",
+      accountId: "a",
+      messageId: "m",
+      kind: "trash",
+      state: "failed",
+      error: "模拟删除失败",
+    },
+    {
+      id: "waiting",
+      accountId: "a",
+      messageId: "m",
+      kind: "move",
+      state: "queued",
+    },
+  ];
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  const operationPanel = page.getByRole("region", {
+    name: "未完成的邮件操作",
+    exact: true,
+  });
+  await operationPanel.getByText("模拟移动失败", { exact: true }).waitFor();
+  const failedMoveRow = operationPanel
+    .locator(".operation-row")
+    .filter({ hasText: "模拟移动失败" });
+  assert.equal(
+    await failedMoveRow
+      .getByRole("button", { name: "重试", exact: true })
+      .count(),
+    0,
+  );
+  await failedMoveRow
+    .getByRole("button", { name: "同步核对", exact: true })
+    .click();
+  await operationPanel.getByText(/已提交同步核对/).waitFor();
+  assert.deepEqual(recordActions.at(-1), {
+    path: "/api/v1/operations/failed-move/reconcile",
+    method: "POST",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  const clearMove = failedMoveRow.getByRole("button", {
+    name: "清除记录",
+    exact: true,
+  });
+  await clearMove.scrollIntoViewIfNeeded();
+  const clearBounds = await clearMove.boundingBox();
+  assert.ok(
+    clearBounds.x >= 0 && clearBounds.x + clearBounds.width <= 390,
+    "operation actions overflow mobile viewport",
+  );
+  await clearMove.click();
+  await operationPanel
+    .getByText("模拟移动失败", { exact: true })
+    .waitFor({ state: "hidden" });
+  await operationPanel
+    .getByRole("button", { name: "清除全部失败记录（2）", exact: true })
+    .click();
+  await operationPanel
+    .getByText("模拟删除失败", { exact: true })
+    .waitFor({ state: "hidden" });
+  assert.equal(await operationPanel.locator(".operation-row").count(), 1);
+  assert.ok((await operationPanel.innerText()).includes("等待同步"));
+  assert.deepEqual(recordActions.at(-1), {
+    path: "/api/v1/operations",
+    method: "DELETE",
+  });
+  operationRecords = [];
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await operationPanel
+    .getByText("没有未完成的操作。", { exact: true })
+    .waitFor();
+  await page.setViewportSize({ width: 1440, height: 900 });
   const syncButton = page.getByRole("button", {
     name: "同步设置",
     exact: true,
@@ -1514,7 +1614,7 @@ try {
   await page.keyboard.press("Escape");
   assert.deepEqual(errors, []);
   console.log(
-    "浏览器验证通过：批量操作后选择计数、失败保留选择、请求期间新增选择及刷新移除失效选择、移动菜单越过弹窗裁切、向上展开及手机完整选择、归档按钮与无目标/已归档保护、默认文件夹顺序与自定义文件夹自然排序、网络恢复自动清理刷新提示且保留操作错误、发件人名称与历史发件箱地址显示、修改密码滑动开关、自定义下拉框与对齐历史折叠、同步设置弹窗桌面/手机与关闭重开、账户安全、全历史任务取消/继续、定时设置及共享登录信息/服务器表单对齐、概览首屏、空邮箱引导与搜索导航、宽屏/手机布局、纯文本缩进与长行折行、邮件原始配色、邮件自身宽度与外层布局居中、自适应高度、HTML 隔离、图片授权及草稿发送。",
+    "浏览器验证通过：失败操作单条/批量清除、移动只读核对与手机按钮布局、批量操作后选择计数、失败保留选择、请求期间新增选择及刷新移除失效选择、移动菜单越过弹窗裁切、向上展开及手机完整选择、归档按钮与无目标/已归档保护、默认文件夹顺序与自定义文件夹自然排序、网络恢复自动清理刷新提示且保留操作错误、发件人名称与历史发件箱地址显示、修改密码滑动开关、自定义下拉框与对齐历史折叠、同步设置弹窗桌面/手机与关闭重开、账户安全、全历史任务取消/继续、定时设置及共享登录信息/服务器表单对齐、概览首屏、空邮箱引导与搜索导航、宽屏/手机布局、纯文本缩进与长行折行、邮件原始配色、邮件自身宽度与外层布局居中、自适应高度、HTML 隔离、图片授权及草稿发送。",
   );
   await context.close();
 } catch (error) {

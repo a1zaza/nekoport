@@ -103,3 +103,42 @@ func TestRollbackDoesNotOverwriteNewerIntent(t *testing.T) {
 		t.Fatal("rollback clobbered a newer intent")
 	}
 }
+
+func TestFailedMoveReconcileOnlyQueuesFolderReads(t *testing.T) {
+	a := testApp(t)
+	a.cancel()
+	seedOperationMessage(t, a)
+	a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
+		x := s.Accounts["account"]
+		x.Paused = false
+		return []storage.Op{storage.Put("accounts", x.ID, x), storage.Put("operations", "failed", domain.Operation{ID: "failed", AccountID: x.ID, MessageID: "m", Kind: "trash", State: "failed", Target: "target", TargetUIDFloor: 50, TargetUIDValidity: 9})}, nil
+	})
+	if e := a.ReconcileOperation("failed"); e != nil {
+		t.Fatal(e)
+	}
+	a.Store.Read(func(s domain.State, _ storage.Index) {
+		if s.Operations["failed"].State != "failed" || s.Messages["m"].UID != 42 || len(s.SyncTasks) != 2 {
+			t.Fatal("reconcile changed operation or mail")
+		}
+		for _, task := range s.SyncTasks {
+			if task.Kind != "delta" || task.Trigger != "operation:manual-check" || len(task.Folders) != 1 {
+				t.Fatal(task)
+			}
+			f := task.Folders[0]
+			if !f.NewMail || !f.Membership || !f.Flags {
+				t.Fatal(f)
+			}
+			if f.MailboxID == "target" && (f.ActivityFrom != 50 || f.ActivityValidity != 9) {
+				t.Fatal("lost target UID baseline", f)
+			}
+		}
+	})
+	a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
+		x := s.Accounts["account"]
+		x.Paused = true
+		return []storage.Op{storage.Put("accounts", x.ID, x)}, nil
+	})
+	if a.ReconcileOperation("failed") == nil {
+		t.Fatal("paused account accepted reconciliation")
+	}
+}

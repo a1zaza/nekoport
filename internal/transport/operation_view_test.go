@@ -69,3 +69,55 @@ func TestQueuedMoveImmediatelyUpdatesListsAndUnread(t *testing.T) {
 		t.Fatal("failed move not restored", w.Body.String())
 	}
 }
+
+func TestClearFailedOperationsProtectsActiveWorkAndMessages(t *testing.T) {
+	s, h := testServer(t)
+	s.App.Close()
+	cookie, csrf := loginTest(t, h)
+	s.App.Store.Update(func(st domain.State, _ storage.Index) ([]storage.Op, error) {
+		ops := []storage.Op{storage.Put("messages", "m", domain.Message{ID: "m", UID: 42, UIDValidity: 7, Seen: true, ContentID: "keep-content"})}
+		for _, state := range []string{"failed", "queued", "running", "done"} {
+			ops = append(ops, storage.Put("operations", state, domain.Operation{ID: state, MessageID: "m", Kind: "move", State: state}))
+		}
+		ops = append(ops, storage.Put("operations", "failed-two", domain.Operation{ID: "failed-two", MessageID: "m", Kind: "seen", State: "failed"}))
+		return ops, nil
+	})
+	for _, id := range []string{"queued", "running", "done"} {
+		w := req(h, "DELETE", "/api/v1/operations/"+id, "http://localhost:8080", nil, cookie, csrf)
+		if w.Code != 400 {
+			t.Fatal("nonfailed operation was removed", id, w.Code)
+		}
+	}
+	w := req(h, "DELETE", "/api/v1/operations/failed", "http://localhost:8080", nil, cookie, "")
+	if w.Code != 403 {
+		t.Fatal("clear bypassed CSRF", w.Code)
+	}
+	for n := 0; n < 2; n++ {
+		w = req(h, "DELETE", "/api/v1/operations/failed", "http://localhost:8080", nil, cookie, csrf)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	w = req(h, "DELETE", "/api/v1/operations", "http://localhost:8080", nil, cookie, csrf)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var result struct {
+		Removed int `json:"removed"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Removed != 1 {
+		t.Fatal(w.Body.String())
+	}
+	s.App.Store.Read(func(st domain.State, _ storage.Index) {
+		if len(st.Operations) != 3 || st.Operations["queued"].State != "queued" || st.Operations["running"].State != "running" {
+			t.Fatal("active work cleared", st.Operations)
+		}
+		m := st.Messages["m"]
+		if m.UID != 42 || !m.Seen || m.ContentID != "keep-content" {
+			t.Fatal("clear changed mail", m)
+		}
+		if len(st.SyncTasks) != 0 {
+			t.Fatal("clear unexpectedly queued remote work")
+		}
+	})
+}
