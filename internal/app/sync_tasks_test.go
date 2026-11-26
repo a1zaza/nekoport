@@ -137,7 +137,7 @@ func TestHistoryImportsOldMailAndResumesWithStableIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result = driveTask(t, a, next.ID, 50); result.State != "succeeded" {
+	if result = driveTask(t, a, next.ID, 300); result.State != "succeeded" {
 		t.Fatal(result)
 	}
 	a.Store.Read(func(s domain.State, _ storage.Index) {

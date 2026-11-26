@@ -172,3 +172,54 @@ it("目录任务归入增量日志并显示 UID 范围和事件原因", async ()
     "0",
   );
 });
+
+it("区分首次列表同步与后续完整任务的正文附件下载进度", async () => {
+  const task: SyncTask = {
+    id: "download",
+    accountId: "a",
+    kind: "reconcile",
+    state: "running",
+    contentPolicyVersion: 1,
+    downloadContent: true,
+    metadataComplete: true,
+    content: { downloaded: 3, reused: 5, failed: 1, bytes: 1024 },
+    folders: [
+      {
+        mailboxId: "inbox",
+        name: "收件箱",
+        phase: "done",
+        processed: 9,
+        contentDone: true,
+        content: { downloaded: 3, reused: 5, failed: 1, bytes: 1024 },
+      },
+    ],
+  };
+  vi.mocked(api).mockImplementation(async (url) => ({
+    items: String(url).includes("group=quick")
+      ? []
+      : [
+          task,
+          { ...task, id: "initial", initialFull: true, downloadContent: false },
+        ],
+  }));
+  render(
+    <SyncPanel
+      account={{ id: "a", name: "工作邮箱", syncDays: 30 } as Account}
+      onSaved={async () => {}}
+    />,
+  );
+  const user = userEvent.setup();
+  await user.click(screen.getByText("同步日志", { exact: true }));
+  expect(
+    await screen.findByText(
+      /正文及附件阶段 · 已下载 3 封 · 已复用 5 封 · 失败 1 项/,
+    ),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("首次完整同步：仅补录列表，不批量下载正文及附件"),
+  ).toBeTruthy();
+  await user.click(
+    screen.getAllByRole("button", { name: /完整对齐 · 进行中/ })[0],
+  );
+  expect(screen.getByText(/正文及附件已处理 · 已下载 3 封/)).toBeTruthy();
+});

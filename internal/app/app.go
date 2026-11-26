@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/mail"
 	"slices"
 	"strings"
@@ -71,6 +70,7 @@ func (a *App) Start() { // Any interrupted SMTP attempt must be confirmed manual
 				o.State = "failed"
 				o.Error = "上次操作被中断，请同步核对后重试"
 				ops = append(ops, storage.Put("operations", id, o))
+				ops = append(ops, rollbackOperation(s, o)...)
 				if o.TargetUIDFloor > 0 {
 					source := s.Messages[o.MessageID].MailboxID
 					var folders []domain.SyncFolder
@@ -524,63 +524,31 @@ func (a *App) ContentContext(ctx context.Context, id string) (domain.Message, do
 	if status.UidValidity != m.UIDValidity {
 		return m, domain.Content{}, errors.New("邮箱标识已变化，请先同步")
 	}
-	set := new(imap.SeqSet)
-	set.AddNum(m.UID)
-	section := &imap.BodySectionName{Peek: true}
-	ch := make(chan *imap.Message, 1)
-	done := make(chan error, 1)
-	go func() { done <- c.UidFetch(set, []imap.FetchItem{section.FetchItem()}, ch) }()
-	var raw []byte
-	for msg := range ch {
-		r := msg.GetBody(section)
-		if r != nil {
-			raw, e = io.ReadAll(io.LimitReader(r, mailer.MaxMIME+1))
-		}
-	}
-	if err := <-done; err != nil {
-		return m, domain.Content{}, err
-	}
-	if e != nil || len(raw) == 0 || len(raw) > mailer.MaxMIME {
-		return m, domain.Content{}, errors.New("正文不可用或大小超限")
-	}
-	content, e := mailer.Parse(raw, a.Store.Object)
+	payload, e := a.fetchContent(c, m)
 	if e != nil {
-		return m, content, e
+		return m, domain.Content{}, e
 	}
-	rawID, e := a.Store.Object(raw)
-	if e != nil {
-		return m, content, e
-	}
-	b, _ := json.Marshal(content)
-	contentID, e := a.Store.Object(b)
-	if e != nil {
-		return m, content, e
-	}
+	content := payload.Content
+
 	e = a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
 		v, ok := s.Messages[id]
 		if !ok || v.UIDValidity != m.UIDValidity {
 			return nil, storage.ErrConflict
 		}
-		v.RawID = rawID
-		v.ContentID = contentID
-		v.CacheBytes = int64(len(raw) + len(b))
-		for _, at := range content.Attachments {
-			v.CacheBytes += at.Size
-		}
-		if v.CacheBytes > int64(s.Settings.CacheMiB)<<20 {
+		v = applyContent(v, payload, false)
+		if !v.ContentPinned && v.CacheBytes > int64(s.Settings.CacheMiB)<<20 {
 			return nil, errors.New("此邮件缓存超过当前预算，请提高缓存预算后重试")
 		}
-		v.CachedAt = time.Now().UTC()
-		preview := []rune(strings.Join(strings.Fields(content.Text), " "))
-		v.Preview = string(preview[:min(len(preview), 160)])
-		v.HasAttachments = len(content.Attachments) > 0
-		v.Revision++
+
 		m = v
 		ops := []storage.Op{storage.Put("messages", id, v)}
-		total := v.CacheBytes
+		total := int64(0)
+		if !v.ContentPinned {
+			total = v.CacheBytes
+		}
 		var cached []domain.Message
 		for otherID, other := range s.Messages {
-			if otherID != id && other.ContentID != "" {
+			if otherID != id && other.ContentID != "" && !other.ContentPinned {
 				total += other.CacheBytes
 				cached = append(cached, other)
 			}
@@ -840,6 +808,7 @@ func (a *App) Operate(ids []string, kind, target string, value bool) error {
 	accounts := map[string]bool{}
 	e := a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
 		var ops []storage.Op
+		ids = slices.Compact(slices.Sorted(slices.Values(ids)))
 		for _, id := range ids {
 			m, ok := s.Messages[id]
 			if !ok {
@@ -859,16 +828,40 @@ func (a *App) Operate(ids []string, kind, target string, value bool) error {
 			}
 			if kind == "move" || kind == "trash" {
 				b, ok := s.Mailboxes[dest]
-				if !ok || b.AccountID != m.AccountID {
+				if !ok || b.AccountID != m.AccountID || b.NoSelect {
 					return nil, errors.New("目标文件夹无效")
 				}
 			}
+			if (kind == "move" || kind == "trash") && dest == m.MailboxID {
+				return nil, errors.New("邮件已在目标文件夹中")
+			}
+			var queued *domain.Operation
 			for _, o := range s.Operations {
-				if o.MessageID == id && o.State == "running" {
-					return nil, errors.New("邮件操作正在执行，请稍后重试")
+				if o.MessageID != id || (o.State != "running" && o.State != "queued") {
+					continue
+				}
+				if o.Kind == "move" || o.Kind == "trash" {
+					return nil, errors.New("邮件正在后台移动，请等待结果确认")
+				}
+				if o.Kind == kind {
+					if o.State == "running" {
+						return nil, errors.New("此状态正在后台提交，请稍后重试")
+					}
+					copy := o
+					queued = &copy
 				}
 			}
-			op := domain.Operation{ID: storage.ID(), AccountID: m.AccountID, MessageID: id, Kind: kind, Target: dest, Value: value, State: "queued", CreatedAt: time.Now().UTC()}
+			op := domain.Operation{ID: storage.ID(), AccountID: m.AccountID, MessageID: id, Kind: kind, Target: dest, Value: value, State: "queued", CreatedAt: time.Now().UTC(), Optimistic: true}
+			if kind == "seen" {
+				op.PreviousValue = m.Seen
+			}
+			if kind == "starred" {
+				op.PreviousValue = m.Starred
+			}
+			if queued != nil {
+				op = *queued
+				op.Value = value
+			}
 			if kind == "seen" {
 				m.Seen = value
 			}
@@ -902,16 +895,24 @@ func (a *App) processOperations(x domain.Account, cred secrets.Credentials) {
 	for _, o := range operations {
 		var m domain.Message
 		var box, target domain.Mailbox
-		a.Store.Read(func(s domain.State, _ storage.Index) {
+		claimed := false
+		if a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
+			current, exists := s.Operations[o.ID]
+			if !exists || current.State != "queued" {
+				return nil, nil
+			}
+			o = current
 			m = s.Messages[o.MessageID]
 			box = s.Mailboxes[m.MailboxID]
 			target = s.Mailboxes[o.Target]
-		})
-		o.State = "running"
-		if a.Store.Update(func(_ domain.State, _ storage.Index) ([]storage.Op, error) {
+			o.State = "running"
+			claimed = true
 			return []storage.Op{storage.Put("operations", o.ID, o)}, nil
 		}) != nil {
 			return
+		}
+		if !claimed {
+			continue
 		}
 		var e error
 		removed := false
@@ -999,6 +1000,9 @@ func (a *App) processOperations(x domain.Account, cred secrets.Credentials) {
 		}
 		a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
 			ops := []storage.Op{storage.Put("operations", o.ID, o)}
+			if e != nil {
+				ops = append(ops, rollbackOperation(s, o)...)
+			}
 			if removed {
 				ops = append(ops, storage.Del("messages", m.ID))
 			}

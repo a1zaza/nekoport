@@ -46,6 +46,7 @@ type Attachment struct {
 	CID  string `json:"cid,omitempty"`
 }
 type Message struct {
+	ContentPinned      bool      `json:"contentPinned,omitempty"`
 	FromName           string    `json:"fromName,omitempty"`
 	FromDisplay        string    `json:"fromDisplay,omitempty"`
 	ToDisplay          string    `json:"toDisplay,omitempty"`
@@ -110,6 +111,8 @@ type SendJob struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 type Operation struct {
+	Optimistic        bool      `json:"optimistic,omitempty"`
+	PreviousValue     bool      `json:"previousValue,omitempty"`
 	TargetUIDFloor    uint32    `json:"targetUidFloor,omitempty"`
 	TargetUIDValidity uint32    `json:"targetUidValidity,omitempty"`
 	ID                string    `json:"id"`

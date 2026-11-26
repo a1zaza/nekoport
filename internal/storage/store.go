@@ -1001,3 +1001,33 @@ func (s *Store) Collect() error {
 }
 
 func (s *Store) Writable() bool { s.mu.RLock(); defer s.mu.RUnlock(); return !s.failed && !s.closed }
+
+// ObjectAvailable checks immutable object presence and size without reading a
+// whole attachment. LoadObject still verifies the hash when content is opened.
+func (s *Store) ObjectAvailable(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	if _, e := hex.DecodeString(id); e != nil {
+		return false
+	}
+	path := filepath.Join(s.root, "objects", id[:2], id)
+	meta, e := os.Open(path + ".json")
+	if e != nil {
+		return false
+	}
+	defer meta.Close()
+	var desc struct {
+		Size int    `json:"size"`
+		Hash string `json:"sha256"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(meta, 1024))
+	if decoder.Decode(&desc) != nil || decoder.Decode(new(any)) != io.EOF || desc.Size < 0 || desc.Size > 32<<20 || len(desc.Hash) != 64 {
+		return false
+	}
+	if _, e := hex.DecodeString(desc.Hash); e != nil {
+		return false
+	}
+	info, e := os.Stat(path)
+	return e == nil && info.Mode().IsRegular() && info.Size() == int64(desc.Size)
+}

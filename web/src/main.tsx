@@ -145,6 +145,7 @@ function App() {
   const [cidImages, setCIDImages] = useState<Record<string, string>>({});
   const loadingRef = useRef(false);
   const detailID = useRef("");
+  const operationEpoch = useRef(0);
   const accounts = data?.accounts || [];
   const mailView = !["overview", "drafts", "outbox", "settings"].includes(view);
   const settings = data?.settings;
@@ -242,6 +243,7 @@ function App() {
   useEffect(() => {
     if (!auth || !mailView) return;
     const controller = new AbortController();
+    const epoch = operationEpoch.current;
     setListLoading(true);
     api<{ items: Message[]; nextCursor: string; partial: boolean }>(
       `/messages?${params}`,
@@ -250,7 +252,8 @@ function App() {
       controller.signal,
     )
       .then((v) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || epoch !== operationEpoch.current)
+          return;
         if (!v || !Array.isArray(v.items)) throw new Error("邮件列表响应无效");
         setItems(v.items);
         // Selection belongs to the visible list, not to removed/filtered rows.
@@ -264,7 +267,11 @@ function App() {
         setPartial(v.partial);
       })
       .catch((e) => {
-        if (!controller.signal.aborted && !isAbortError(e))
+        if (
+          !controller.signal.aborted &&
+          epoch === operationEpoch.current &&
+          !isAbortError(e)
+        )
           setListError(e.message);
       })
       .finally(() => {
@@ -302,7 +309,10 @@ function App() {
             value: true,
             target: "",
           })
-            .then(() => refresh())
+            .then(() => {
+              applyLocalOperation([selected], "seen", true);
+              void refresh();
+            })
             .catch((e) => setError(e.message));
         }
       })
@@ -326,6 +336,7 @@ function App() {
   async function more() {
     if (!cursor || loadingRef.current) return;
     loadingRef.current = true;
+    const epoch = operationEpoch.current;
     setListLoading(true);
     try {
       const v = await api<{
@@ -333,6 +344,7 @@ function App() {
         nextCursor: string;
         partial: boolean;
       }>(`/messages?${params}&cursor=${encodeURIComponent(cursor)}`);
+      if (epoch !== operationEpoch.current) return;
       if (!v || !Array.isArray(v.items)) throw new Error("邮件列表响应无效");
       setItems((old) => [
         ...old,
@@ -342,7 +354,8 @@ function App() {
       setCursor(v.nextCursor);
       setPartial(v.partial);
     } catch (e) {
-      if (!isAbortError(e)) setListError((e as Error).message);
+      if (epoch === operationEpoch.current && !isAbortError(e))
+        setListError((e as Error).message);
     } finally {
       loadingRef.current = false;
       setListLoading(false);
@@ -412,6 +425,62 @@ function App() {
       body: `\n\n${time(m.date, true)}，${m.fromDisplay || m.from} 写道：\n${quote}`,
     });
   }
+  // Apply only after the intent is durably queued, without waiting for refresh/IMAP.
+  function applyLocalOperation(ids: string[], kind: string, value = false) {
+    operationEpoch.current++;
+    const targets = new Set(ids);
+    const moving = kind === "move" || kind === "trash";
+    const known = new Map(items.map((m) => [m.id, m]));
+    if (detail?.message && !known.has(detail.message.id))
+      known.set(detail.message.id, detail.message);
+    const patch = (m: Message) =>
+      !targets.has(m.id)
+        ? m
+        : {
+            ...m,
+            ...(kind === "seen" ? { seen: value } : {}),
+            ...(kind === "starred" ? { starred: value } : {}),
+          };
+    setItems((current) =>
+      current
+        .map(patch)
+        .filter(
+          (m) =>
+            !(moving && targets.has(m.id)) &&
+            !(unread && m.seen) &&
+            !(view === "starred" && !m.starred),
+        ),
+    );
+    setDetail((current) =>
+      current ? { ...current, message: patch(current.message) } : current,
+    );
+    setData((current) => {
+      if (!current) return current;
+      const changes = new Map<string, number>();
+      let removed = 0;
+      for (const id of targets) {
+        const m = known.get(id);
+        if (!m) continue;
+        if (moving) removed++;
+        const delta = moving
+          ? m.seen
+            ? 0
+            : -1
+          : kind === "seen"
+            ? Number(!value) - Number(!m.seen)
+            : 0;
+        changes.set(m.mailboxId, (changes.get(m.mailboxId) || 0) + delta);
+      }
+      return {
+        ...current,
+        total: Math.max(0, current.total - removed),
+        mailboxes: current.mailboxes.map((b) => ({
+          ...b,
+          unread: Math.max(0, b.unread + (changes.get(b.id) || 0)),
+        })),
+      };
+    });
+  }
   function completeOperation(ids: string[], closeReader = false) {
     const completed = new Set(ids);
     // A request may finish after the user has selected other messages.
@@ -438,6 +507,7 @@ function App() {
         value,
         target,
       });
+      applyLocalOperation(targets, kind, value);
       completeOperation(targets, kind === "move" || kind === "trash");
     });
   }
@@ -454,8 +524,9 @@ function App() {
           value: false,
           target: "",
         });
+        applyLocalOperation(ids, "trash");
         completeOperation(ids, true);
-        await refresh();
+        void refresh();
       },
     });
   }
@@ -495,6 +566,7 @@ function App() {
           value: false,
           target,
         });
+        applyLocalOperation([id], "move");
         completeOperation([id], true);
       });
     } finally {
@@ -833,6 +905,18 @@ function App() {
               </button>
             </div>
           )}
+          {data?.operations.some((o) => o.state === "failed") &&
+            view !== "settings" && (
+              <div className="notice" role="status">
+                后台邮件操作有失败，请查看操作记录；移动结果不确定时请先同步核对。
+                <button
+                  className="secondary small"
+                  onClick={() => navigate("settings")}
+                >
+                  查看操作记录
+                </button>
+              </div>
+            )}
           {notice && (
             <div className="notice" role="status">
               {notice}
@@ -2046,7 +2130,7 @@ function SettingsPage({
                   }
                 />
               </Field>
-              <Field label="可重取缓存预算（MiB）">
+              <Field label="普通可重取缓存预算（MiB）">
                 <input
                   required
                   inputMode="numeric"
@@ -2084,6 +2168,9 @@ function SettingsPage({
             <Clock size={17} />
             未完成的邮件操作
           </h2>
+          <p className="muted">
+            移动、删除先在本地移出列表，后台再提交；目标目录等待服务器确认。失败时恢复显示；结果不确定的移动请先同步核对，不会自动重放。
+          </p>
           {data.operations.length ? (
             data.operations.map((o) => (
               <div className="operation-row" key={o.id}>

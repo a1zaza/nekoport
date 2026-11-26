@@ -269,9 +269,20 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 			a.CredentialRef = ""
 			accounts = append(accounts, a)
 		}
+		hidden := domain.PendingMoves(st)
+		unread := map[string]int{}
+		for id, n := range i.Unread {
+			unread[id] = n
+		}
+		for id := range hidden {
+			m := st.Messages[id]
+			if !m.Seen {
+				unread[m.MailboxID]--
+			}
+		}
 		boxes := []map[string]any{}
 		for _, b := range st.Mailboxes {
-			boxes = append(boxes, map[string]any{"id": b.ID, "accountId": b.AccountID, "name": b.Name, "role": b.Role, "unread": i.Unread[b.ID]})
+			boxes = append(boxes, map[string]any{"id": b.ID, "accountId": b.AccountID, "name": b.Name, "role": b.Role, "unread": max(0, unread[b.ID])})
 		}
 		drafts := []domain.Draft{}
 		for _, d := range st.Drafts {
@@ -312,7 +323,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		out["syncTasks"] = tasks
 		out["syncStatus"] = st.SyncStatus
 		out["authAccount"] = map[string]any{"username": st.Settings.Username, "revision": authRevision(st.Settings.AuthRevision)}
-		out["total"] = len(st.Messages)
+		out["total"] = len(st.Messages) - len(hidden)
 	})
 	out["storage"] = map[string]bool{"writable": s.App.Store.Writable()}
 	out["running"] = s.App.Running()
@@ -431,7 +442,11 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	var msgs []domain.Message
 	s.App.Store.Read(func(st domain.State, i storage.Index) {
+		hidden := domain.PendingMoves(st)
 		for _, id := range i.All {
+			if hidden[id] {
+				continue
+			}
 			m := st.Messages[id]
 			if v := q.Get("account"); v != "" && m.AccountID != v {
 				continue
@@ -557,15 +572,35 @@ func (s *Server) retryOperation(w http.ResponseWriter, r *http.Request) {
 		if o.Kind == "move" || o.Kind == "trash" {
 			return nil, errors.New("移动结果可能已生效，请先同步核对并重新选择邮件操作")
 		}
+		m, exists := st.Messages[o.MessageID]
+		if !exists {
+			return nil, errors.New("邮件已不存在，请重新同步")
+		}
+		for _, pending := range st.Operations {
+			if pending.MessageID == o.MessageID && (pending.State == "queued" || pending.State == "running") {
+				return nil, errors.New("邮件已有待提交操作，请稍后重试")
+			}
+		}
+		o.Optimistic = true
+		if o.Kind == "seen" {
+			o.PreviousValue = m.Seen
+			m.Seen = o.Value
+		} else {
+			o.PreviousValue = m.Starred
+			m.Starred = o.Value
+		}
+		m.Revision++
+		o.CreatedAt = time.Now().UTC()
 		o.State = "queued"
 		o.Error = ""
 		account = o.AccountID
-		return []storage.Op{storage.Put("operations", o.ID, o)}, nil
+		return []storage.Op{storage.Put("operations", o.ID, o), storage.Put("messages", m.ID, m)}, nil
 	})
 	if e != nil {
 		failure(w, e)
 		return
 	}
+	s.App.Changed()
 	s.App.Trigger(account)
 	JSON(w, 200, map[string]bool{"ok": true})
 }

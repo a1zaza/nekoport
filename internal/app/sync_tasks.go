@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -74,6 +75,7 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 				result.RecentDays = x.SyncDays
 				appendSyncLog(&result, domain.SyncLog{Action: "upgraded", Message: "任务升级为全历史同步，重新枚举"})
 				result.Kind = "history"
+				result.Trigger = trigger
 				result.ScopeType = "account"
 				result.Discover = false
 				result.Recovery = false
@@ -81,6 +83,13 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 				result.Generation = storage.ID()
 				result.Folders = nil
 				result.Discovered = false
+				result.MetadataComplete = false
+				result.Content = domain.ContentProgress{}
+				configureFullContent(&result, s.SyncStatus[accountID])
+				if result.DownloadContent {
+					result.Scope = "all"
+					result.RecentDays = 0
+				}
 				result.UpdatedAt = now
 				ops = append(ops, storage.Put("syncTasks", result.ID, result))
 			} else if kind == "reconcile" && result.Incremental() {
@@ -93,6 +102,7 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 		}
 
 		result = domain.SyncTask{ScopeType: "account", ID: storage.ID(), Generation: storage.ID(), AccountID: accountID, Kind: kind, Trigger: trigger, RequestKey: requestKey, State: "queued", AccountRevision: x.Revision, CreatedAt: now, UpdatedAt: now, LogVersion: 1, Scope: x.Scope(), RecentDays: x.SyncDays}
+		configureFullContent(&result, s.SyncStatus[accountID])
 		appendSyncLog(&result, domain.SyncLog{Action: "created", Message: "同步任务已创建"})
 		st := s.SyncStatus[accountID]
 		st.AccountID = accountID
@@ -168,9 +178,33 @@ func (a *App) SyncTaskAction(id, action string) error {
 				}
 				t.Discovered = false
 				t.Generation = storage.ID()
+				t.MetadataComplete = false
+				t.Content = domain.ContentProgress{}
 				t.AccountRevision = x.Revision
 			}
 			t.Discovered = false
+			if t.DownloadContent && t.MetadataComplete {
+				metadataNeeded := false
+				for _, f := range t.Folders {
+					metadataNeeded = metadataNeeded || f.Phase == "failed" || f.ContentNeedsMetadata
+				}
+				if !metadataNeeded {
+					t.Discovered = true
+				} else {
+					t.MetadataComplete = false
+					for i := range t.Folders {
+						t.Folders[i].Phase = "init"
+						t.Folders[i].SnapshotAt = time.Time{}
+					}
+				}
+				t.Content = domain.ContentProgress{}
+				for i := range t.Folders {
+					t.Folders[i].Content = domain.ContentProgress{}
+					t.Folders[i].ContentUID = 0
+					t.Folders[i].ContentDone = false
+					t.Folders[i].ContentNeedsMetadata = false
+				}
+			}
 			for i := range t.Folders {
 				if t.Folders[i].Phase == "failed" {
 					t.Folders[i].Phase = "scan"
@@ -178,6 +212,9 @@ func (a *App) SyncTaskAction(id, action string) error {
 				}
 			}
 			t.Scope = x.Scope()
+			if t.DownloadContent {
+				t.Scope = "all"
+			}
 			t.RecentDays = x.SyncDays
 			appendSyncLog(&t, domain.SyncLog{Action: "resumed", Message: "继续任务，统计累计已提交结果"})
 			t.State = "queued"
@@ -365,6 +402,11 @@ func (a *App) advanceSyncTask(x domain.Account, cred secrets.Credentials) bool {
 			appendSyncLog(&v, domain.SyncLog{Action: "restarted", Message: "邮箱配置变化，重新枚举；保留累计统计"})
 			v.Generation = storage.ID()
 			v.Discovered = false
+			v.MetadataComplete = false
+			v.Content = domain.ContentProgress{}
+			if v.DownloadContent {
+				v.Scope = "all"
+			}
 			if v.Kind == "delta" {
 				for i := range v.Folders {
 					v.Folders[i].Phase = "init"
@@ -407,6 +449,9 @@ func (a *App) advanceSyncTask(x domain.Account, cred secrets.Credentials) bool {
 			break
 		}
 		t = current
+		if c.State() == imap.LogoutState {
+			break
+		}
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrConflict) || errors.Is(err, context.Canceled) || ctx.Err() != nil && a.ctx.Err() != nil {
@@ -439,6 +484,23 @@ func listFolders(c *client.Client) ([]*imap.MailboxInfo, error) {
 func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) error {
 	if t.Kind == "delta" {
 		return a.deltaStep(c, x, t)
+	}
+	if (t.Kind == "reconcile" || t.Kind == "history") && t.ContentPolicyVersion == 0 {
+		a.Store.Read(func(s domain.State, _ storage.Index) { configureFullContent(&t, s.SyncStatus[x.ID]) })
+		return a.taskCommit(t, t, nil)
+	}
+	if t.DownloadContent {
+		x.SyncScope = "all"
+	}
+	if t.MetadataComplete {
+		if handled, e := a.downloadStep(c, x, t); handled || e != nil {
+			return e
+		}
+		partial := t.Content.Failed > 0
+		for _, f := range t.Folders {
+			partial = partial || f.Phase == "failed"
+		}
+		return a.finishSyncTask(x, t.Clone(), t, partial)
 	}
 	before := t.Clone()
 	t = t.Clone() // failed commits must not advance the caller's recovery cursor
@@ -644,6 +706,7 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 							value.Starred = slices.Contains(m.Flags, imap.FlaggedFlag)
 						}
 						value.ID = oldID
+						value.ContentPinned = old.ContentPinned
 						value.RawID = old.RawID
 						value.ContentID = old.ContentID
 						value.Preview = old.Preview
@@ -779,10 +842,18 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 			})
 		}
 	}
+	if t.DownloadContent {
+		t.MetadataComplete = true
+		appendSyncLog(&t, domain.SyncLog{Action: "content-start", Message: "元数据对齐结束，开始保存全部邮件正文及 MIME 附件"})
+		return a.taskCommit(before, t, nil)
+	}
+	return a.finishSyncTask(x, before, t, partial)
+}
+func (a *App) finishSyncTask(x domain.Account, before, t domain.SyncTask, partial bool) error {
 	t.State = "succeeded"
 	if partial {
 		t.State = "partial_failed"
-		t.Error = "部分文件夹同步失败，请查看目录进度"
+		t.Error = fmt.Sprintf("部分目录或正文/附件下载失败（下载失败 %d 项），请查看日志", t.Content.Failed)
 	}
 	t.FinishedAt = time.Now().UTC()
 	return a.taskCommit(before, t, func(s domain.State, _ storage.Index) ([]storage.Op, error) {
@@ -805,6 +876,7 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 				st.LastQuick = t.FinishedAt
 				st.NextQuick = time.Time{}
 			} else {
+				st.FirstFullCompleted = true
 				st.LastFull = t.FinishedAt
 				st.NextFull = t.FinishedAt.Add(time.Duration(account.ReconcileMinutes()) * time.Minute)
 				st.PendingReconcile = false

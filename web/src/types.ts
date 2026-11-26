@@ -152,7 +152,18 @@ export type SyncLog = {
   lastUid?: number;
   stats: SyncCounters;
 };
+export type ContentProgress = {
+  downloaded: number;
+  reused: number;
+  failed: number;
+  bytes: number;
+};
 export type SyncTask = {
+  initialFull?: boolean;
+  downloadContent?: boolean;
+  metadataComplete?: boolean;
+  contentPolicyVersion?: number;
+  content?: ContentProgress;
   retryAt?: string;
   scopeType?: string;
   reasons?: string[];
@@ -183,6 +194,8 @@ export type SyncTask = {
     upperUid?: number;
     nextUid?: number;
     stats?: SyncCounters;
+    content?: ContentProgress;
+    contentDone?: boolean;
     error?: string;
   }[];
 };

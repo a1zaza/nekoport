@@ -91,7 +91,7 @@ func auditSyncCommit(s domain.State, indexes storage.Index, before domain.SyncTa
 	}
 	batches := map[string]*batch{}
 	for _, op := range ops {
-		if op.Bucket != "messages" {
+		if op.Bucket != "messages" || after.MetadataComplete {
 			continue
 		}
 		old, exists := s.Messages[op.ID]

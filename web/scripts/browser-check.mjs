@@ -160,6 +160,7 @@ const mailOperations = [];
 let listMessages = null;
 let rejectOperation = false;
 let holdOperation = null;
+let holdBootstrap = null;
 let removeOperationTargets = false;
 let failedBootstrap = 0,
   failedMessages = 0,
@@ -284,6 +285,7 @@ try {
     const req = route.request(),
       path = new URL(req.url()).pathname;
     let result = { ok: true };
+    if (path.endsWith("/bootstrap") && holdBootstrap) await holdBootstrap;
     if (path.endsWith("/bootstrap") && failedBootstrap > 0) {
       failedBootstrap--;
       return route.abort("failed");
@@ -1003,6 +1005,11 @@ try {
   await firstCheck.check();
   await secondCheck.check();
   removeOperationTargets = true;
+  // Local acknowledgement must remove rows even while the follow-up refresh stalls.
+  let releaseBootstrap;
+  holdBootstrap = new Promise((resolve) => {
+    releaseBootstrap = resolve;
+  });
   await page.getByRole("button", { name: "批量移动", exact: true }).click();
   const moveDialog = page.getByRole("dialog", {
     name: "移动到文件夹",
@@ -1022,6 +1029,8 @@ try {
     value: false,
     target: "custom2",
   });
+  releaseBootstrap();
+  holdBootstrap = null;
   // A server refresh may remove a selected message independently of an action.
   listMessages = [msg, second, third];
   await page.evaluate(() => window.dispatchEvent(new Event("online")));

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Clock, RefreshCw, History, ChevronDown } from "lucide-react";
-import { api, time } from "./api";
+import { api, time, size } from "./api";
 import { useBackgroundRefresh } from "./useBackgroundRefresh";
 import { Field, ErrorBox, Select } from "./components";
 import type {
@@ -466,6 +466,15 @@ export function SyncPanel({
                   {(t.folders || []).length}
                   {current ? ` · ${current.name}` : ""}
                 </p>
+                {t.contentPolicyVersion ? (
+                  <p className="muted">
+                    {t.initialFull
+                      ? "首次完整同步：仅补录列表，不批量下载正文及附件"
+                      : t.downloadContent
+                        ? `${t.metadataComplete ? "正文及附件阶段" : "元数据对齐阶段"} · 已下载 ${t.content?.downloaded || 0} 封 · 已复用 ${t.content?.reused || 0} 封 · 失败 ${t.content?.failed || 0} 项 · 本次保存 ${size(t.content?.bytes || 0)}`
+                        : "仅同步邮件列表"}
+                  </p>
+                ) : null}
                 {t.logVersion ? (
                   <p className="sync-task-stats">{counterText(t.stats)}</p>
                 ) : (
@@ -525,6 +534,14 @@ export function SyncPanel({
                               </p>
                               <p>{counterText(f.stats)}</p>
                             </>
+                          )}
+                          {t.downloadContent && (
+                            <p>
+                              正文及附件{f.contentDone ? "已处理" : "待处理"} ·
+                              已下载 {f.content?.downloaded || 0} 封 · 已复用{" "}
+                              {f.content?.reused || 0} 封 · 失败{" "}
+                              {f.content?.failed || 0} 项
+                            </p>
                           )}
                           {f.error && (
                             <span className="danger"> · {f.error}</span>

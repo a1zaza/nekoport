@@ -2,28 +2,39 @@ package domain
 
 import "time"
 
+type ContentProgress struct {
+	Downloaded int   `json:"downloaded"`
+	Reused     int   `json:"reused"`
+	Failed     int   `json:"failed"`
+	Bytes      int64 `json:"bytes"`
+}
+
 type SyncFolder struct {
-	ActivityFrom     uint32       `json:"activityFrom,omitempty"`
-	ActivityValidity uint32       `json:"activityValidity,omitempty"`
-	BaselineUID      uint32       `json:"baselineUid,omitempty"`
-	NewMail          bool         `json:"newMail,omitempty"`
-	Flags            bool         `json:"flags,omitempty"`
-	Membership       bool         `json:"membership,omitempty"`
-	UIDs             []uint32     `json:"uids,omitempty"`
-	CheckedUID       uint32       `json:"checkedUid,omitempty"`
-	Initial          bool         `json:"initial,omitempty"`
-	SnapshotAt       time.Time    `json:"snapshotAt,omitempty"`
-	LocalBefore      int          `json:"localBefore"`
-	RemoteTotal      uint32       `json:"remoteTotal"`
-	Stats            SyncCounters `json:"stats"`
-	MailboxID        string       `json:"mailboxId"`
-	Name             string       `json:"name"`
-	UIDValidity      uint32       `json:"uidValidity"`
-	UpperUID         uint32       `json:"upperUid"`
-	NextUID          uint64       `json:"nextUid"`
-	Phase            string       `json:"phase"`
-	Processed        int          `json:"processed"`
-	Error            string       `json:"error,omitempty"`
+	ContentUID           uint32          `json:"contentUid,omitempty"`
+	ContentDone          bool            `json:"contentDone,omitempty"`
+	ContentNeedsMetadata bool            `json:"contentNeedsMetadata,omitempty"`
+	Content              ContentProgress `json:"content"`
+	ActivityFrom         uint32          `json:"activityFrom,omitempty"`
+	ActivityValidity     uint32          `json:"activityValidity,omitempty"`
+	BaselineUID          uint32          `json:"baselineUid,omitempty"`
+	NewMail              bool            `json:"newMail,omitempty"`
+	Flags                bool            `json:"flags,omitempty"`
+	Membership           bool            `json:"membership,omitempty"`
+	UIDs                 []uint32        `json:"uids,omitempty"`
+	CheckedUID           uint32          `json:"checkedUid,omitempty"`
+	Initial              bool            `json:"initial,omitempty"`
+	SnapshotAt           time.Time       `json:"snapshotAt,omitempty"`
+	LocalBefore          int             `json:"localBefore"`
+	RemoteTotal          uint32          `json:"remoteTotal"`
+	Stats                SyncCounters    `json:"stats"`
+	MailboxID            string          `json:"mailboxId"`
+	Name                 string          `json:"name"`
+	UIDValidity          uint32          `json:"uidValidity"`
+	UpperUID             uint32          `json:"upperUid"`
+	NextUID              uint64          `json:"nextUid"`
+	Phase                string          `json:"phase"`
+	Processed            int             `json:"processed"`
+	Error                string          `json:"error,omitempty"`
 }
 
 // Counters describe committed comparisons, including repeated checks on retry.
@@ -47,45 +58,51 @@ type SyncLog struct {
 }
 
 type SyncTask struct {
-	RetryAt         time.Time    `json:"retryAt,omitempty"`
-	Failures        int          `json:"failures,omitempty"`
-	ScopeType       string       `json:"scopeType,omitempty"`
-	Reasons         []string     `json:"reasons,omitempty"`
-	Discover        bool         `json:"discover,omitempty"`
-	Recovery        bool         `json:"recovery,omitempty"`
-	LogVersion      int          `json:"logVersion,omitempty"`
-	Scope           string       `json:"scope,omitempty"`
-	RecentDays      int          `json:"recentDays,omitempty"`
-	StartedAt       time.Time    `json:"startedAt,omitempty"`
-	Stats           SyncCounters `json:"stats"`
-	Logs            []SyncLog    `json:"logs,omitempty"`
-	LogsDropped     int          `json:"logsDropped,omitempty"`
-	Generation      string       `json:"generation"`
-	ID              string       `json:"id"`
-	AccountID       string       `json:"accountId"`
-	Kind            string       `json:"kind"`
-	Trigger         string       `json:"trigger"`
-	RequestKey      string       `json:"requestKey,omitempty"`
-	State           string       `json:"state"`
-	AccountRevision int          `json:"accountRevision"`
-	Folders         []SyncFolder `json:"folders"`
-	Discovered      bool         `json:"discovered"`
-	CreatedAt       time.Time    `json:"createdAt"`
-	UpdatedAt       time.Time    `json:"updatedAt"`
-	FinishedAt      time.Time    `json:"finishedAt,omitempty"`
-	Error           string       `json:"error,omitempty"`
+	ContentPolicyVersion int             `json:"contentPolicyVersion,omitempty"`
+	InitialFull          bool            `json:"initialFull,omitempty"`
+	DownloadContent      bool            `json:"downloadContent,omitempty"`
+	MetadataComplete     bool            `json:"metadataComplete,omitempty"`
+	Content              ContentProgress `json:"content"`
+	RetryAt              time.Time       `json:"retryAt,omitempty"`
+	Failures             int             `json:"failures,omitempty"`
+	ScopeType            string          `json:"scopeType,omitempty"`
+	Reasons              []string        `json:"reasons,omitempty"`
+	Discover             bool            `json:"discover,omitempty"`
+	Recovery             bool            `json:"recovery,omitempty"`
+	LogVersion           int             `json:"logVersion,omitempty"`
+	Scope                string          `json:"scope,omitempty"`
+	RecentDays           int             `json:"recentDays,omitempty"`
+	StartedAt            time.Time       `json:"startedAt,omitempty"`
+	Stats                SyncCounters    `json:"stats"`
+	Logs                 []SyncLog       `json:"logs,omitempty"`
+	LogsDropped          int             `json:"logsDropped,omitempty"`
+	Generation           string          `json:"generation"`
+	ID                   string          `json:"id"`
+	AccountID            string          `json:"accountId"`
+	Kind                 string          `json:"kind"`
+	Trigger              string          `json:"trigger"`
+	RequestKey           string          `json:"requestKey,omitempty"`
+	State                string          `json:"state"`
+	AccountRevision      int             `json:"accountRevision"`
+	Folders              []SyncFolder    `json:"folders"`
+	Discovered           bool            `json:"discovered"`
+	CreatedAt            time.Time       `json:"createdAt"`
+	UpdatedAt            time.Time       `json:"updatedAt"`
+	FinishedAt           time.Time       `json:"finishedAt,omitempty"`
+	Error                string          `json:"error,omitempty"`
 }
 type SyncStatus struct {
-	AccountID        string    `json:"accountId"`
-	LastQuick        time.Time `json:"lastQuickSuccessAt"`
-	LastFull         time.Time `json:"lastFullSuccessAt"`
-	NextQuick        time.Time `json:"nextQuickAt"`
-	NextFull         time.Time `json:"nextDueAt"`
-	RetryAt          time.Time `json:"retryAt"`
-	Failures         int       `json:"failures"`
-	ErrorKind        string    `json:"errorKind,omitempty"`
-	Error            string    `json:"error,omitempty"`
-	PendingReconcile bool      `json:"pendingReconcile"`
+	FirstFullCompleted bool      `json:"firstFullCompleted,omitempty"`
+	AccountID          string    `json:"accountId"`
+	LastQuick          time.Time `json:"lastQuickSuccessAt"`
+	LastFull           time.Time `json:"lastFullSuccessAt"`
+	NextQuick          time.Time `json:"nextQuickAt"`
+	NextFull           time.Time `json:"nextDueAt"`
+	RetryAt            time.Time `json:"retryAt"`
+	Failures           int       `json:"failures"`
+	ErrorKind          string    `json:"errorKind,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	PendingReconcile   bool      `json:"pendingReconcile"`
 }
 
 func (t SyncTask) Active() bool      { return t.State == "queued" || t.State == "running" }
