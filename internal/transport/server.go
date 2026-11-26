@@ -424,6 +424,9 @@ func (s *Server) syncAccount(w http.ResponseWriter, r *http.Request) {
 	JSON(w, 202, publicTask(t))
 }
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
+	if mailbox := r.URL.Query().Get("mailbox"); mailbox != "" {
+		s.App.PreferMailbox(mailbox)
+	}
 	q := r.URL.Query()
 	limit := 50
 	var msgs []domain.Message

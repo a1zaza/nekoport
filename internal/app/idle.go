@@ -12,30 +12,31 @@ import (
 	"github.com/a1zaza/nekoport/internal/storage"
 )
 
-// Runtime-only connection state: no secrets, no checkpoint writes per heartbeat.
 type IdleStatus struct {
 	State     string    `json:"state"`
 	Connected int       `json:"connected"`
 	Total     int       `json:"total"`
+	Limited   []string  `json:"limitedFolders,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	RetryAt   time.Time `json:"retryAt,omitempty"`
 	LastEvent time.Time `json:"lastEventAt,omitempty"`
 }
 type idleWatcher struct {
+	capabilities    mailer.IdleNotice
 	accountID, name string
 	revision        int
 	cancel          context.CancelFunc
 	status          IdleStatus
 }
 type idleDemand struct {
-	full    bool
-	quick   bool
-	trigger string
-	at      time.Time
+	reasons            []string
+	accountID, trigger string
+	folder             domain.SyncFolder
+	discover, recovery bool
+	at                 time.Time
+	version            uint64
 }
 
-// maintainIdle only examines local configuration. It performs no periodic IMAP
-// queries. New folders are discovered by initial/manual/scheduled reconciliation.
 func (a *App) maintainIdle(now time.Time) {
 	accounts := map[string]domain.Account{}
 	boxes := map[string]domain.Mailbox{}
@@ -59,43 +60,90 @@ func (a *App) maintainIdle(now time.Time) {
 		a.mu.Unlock()
 		return
 	}
-	for id, w := range a.idleWatchers {
-		b, exists := boxes[id]
-		x := accounts[w.accountID]
-		if !exists || w.revision != x.Revision || w.name != b.Name {
-			w.cancel()
-			delete(a.idleWatchers, id)
-		}
-	}
 	for id := range a.idleAccounts {
 		if _, ok := accounts[id]; !ok {
 			delete(a.idleAccounts, id)
-			delete(a.idlePending, id)
+		}
+	}
+	for key, d := range a.idlePending {
+		_, exists := accounts[d.accountID]
+		_, folderExists := boxes[d.folder.MailboxID]
+		if !exists || d.folder.MailboxID != "" && !folderExists {
+			delete(a.idlePending, key)
 		}
 	}
 	for id, x := range accounts {
-		if revision, ok := a.idleAccounts[id]; !ok || revision != x.Revision {
-			deliveries = append(deliveries, id)
+		if rev, ok := a.idleAccounts[id]; !ok || rev != x.Revision {
+			for key, d := range a.idlePending {
+				if d.accountID == id {
+					delete(a.idlePending, key)
+				}
+			}
 			a.idleAccounts[id] = x.Revision
-			a.idlePending[id] = idleDemand{full: true, at: now, trigger: "startup"}
+			delete(a.idleLimits, id)
+			deliveries = append(deliveries, id)
+			a.demandLocked("discover:"+id, id, domain.SyncFolder{}, "startup", true, true, now)
 		}
 	}
-	// Start INBOX first; other folders also need their own selected connection.
 	ids := make([]string, 0, len(boxes))
 	for id := range boxes {
 		ids = append(ids, id)
 	}
+	priority := func(role string) int {
+		switch role {
+		case "inbox":
+			return 0
+		case "sent":
+			return 1
+		case "archive":
+			return 2
+		}
+		return 3
+	}
 	slices.SortFunc(ids, func(l, r string) int {
-		if boxes[l].Role == "inbox" && boxes[r].Role != "inbox" {
+		p, q := priority(boxes[l].Role), priority(boxes[r].Role)
+		if a.idleFocused[boxes[l].AccountID] == l {
+			p = -1
+		}
+		if a.idleFocused[boxes[r].AccountID] == r {
+			q = -1
+		}
+		if p != q {
+			return p - q
+		}
+		if boxes[l].Name < boxes[r].Name {
 			return -1
 		}
-		if boxes[r].Role == "inbox" && boxes[l].Role != "inbox" {
-			return 1
-		}
-		return 0
+		return 1
 	})
+	allowed := map[string]bool{}
+	counts := map[string]int{}
+	a.idleUnwatched = map[string][]string{}
+	a.idleTotals = map[string]int{}
 	for _, id := range ids {
-		if _, ok := a.idleWatchers[id]; ok {
+		b := boxes[id]
+		x := accounts[b.AccountID]
+		limit := imapLimit(x) - 3
+		if reduced, ok := a.idleLimits[x.ID]; ok {
+			limit = min(limit, reduced)
+		}
+		a.idleTotals[x.ID]++
+		if counts[x.ID] < limit {
+			allowed[id] = true
+			counts[x.ID]++
+		} else {
+			a.idleUnwatched[x.ID] = append(a.idleUnwatched[x.ID], b.Name)
+		}
+	}
+	for id, w := range a.idleWatchers {
+		b, exists := boxes[id]
+		if !exists || !allowed[id] || w.revision != accounts[w.accountID].Revision || w.name != b.Name {
+			w.cancel()
+			delete(a.idleWatchers, id)
+		}
+	}
+	for _, id := range ids {
+		if !allowed[id] || a.idleWatchers[id] != nil {
 			continue
 		}
 		b := boxes[id]
@@ -113,7 +161,33 @@ func (a *App) maintainIdle(now time.Time) {
 	a.flushIdle(now)
 }
 
+func (a *App) demandLocked(key, id string, f domain.SyncFolder, reason string, discover, recovery bool, now time.Time) {
+	d, exists := a.idlePending[key]
+	if !exists {
+		d = idleDemand{accountID: id, at: now, trigger: reason, folder: f}
+	}
+	d.folder.NewMail = d.folder.NewMail || f.NewMail
+	d.folder.Flags = d.folder.Flags || f.Flags
+	d.folder.Membership = d.folder.Membership || f.Membership
+	d.folder.UIDs = append(d.folder.UIDs, f.UIDs...)
+	slices.Sort(d.folder.UIDs)
+	d.folder.UIDs = slices.Compact(d.folder.UIDs)
+	if len(d.folder.UIDs) > 1000 {
+		d.folder.UIDs = nil
+		d.folder.Flags = true
+	}
+	d.discover = d.discover || discover
+	d.recovery = d.recovery || recovery
+	if !slices.Contains(d.reasons, reason) && len(d.reasons) < 32 {
+		d.reasons = append(d.reasons, reason)
+	}
+	d.version++
+	a.idlePending[key] = d
+}
 func (a *App) idleEvent(id string, w *idleWatcher, kind mailer.IdleEvent) {
+	a.idleNotice(id, w, mailer.IdleNotice{Kind: kind})
+}
+func (a *App) idleNotice(id string, w *idleWatcher, n mailer.IdleNotice) {
 	a.mu.Lock()
 	if a.idleWatchers[id] != w || a.ctx.Err() != nil {
 		a.mu.Unlock()
@@ -121,67 +195,73 @@ func (a *App) idleEvent(id string, w *idleWatcher, kind mailer.IdleEvent) {
 	}
 	now := time.Now().UTC()
 	w.status.LastEvent = now
-	if kind == mailer.IdleAlert {
-		w.status.Error = "服务器发出 IDLE ALERT，请检查邮箱服务状态"
+	if n.Kind == mailer.IdleCapabilities {
+		w.capabilities = n
+	} else if n.Kind == mailer.IdleAlert {
+		w.status.Error = "服务器发出 IDLE 状态提示，请检查邮箱服务状态"
 	} else {
-		d, exists := a.idlePending[w.accountID]
-		d.full = d.full || kind == mailer.IdleReconcile
-		d.quick = d.quick || kind == mailer.IdleNewMail
-		d.trigger = "idle"
-		if !exists {
-			d.at = now
+		f := domain.SyncFolder{MailboxID: id, Name: w.name}
+		switch n.Kind {
+		case mailer.IdleNewMail:
+			f.NewMail = true
+		case mailer.IdleFlags:
+			if n.UID > 0 {
+				f.UIDs = []uint32{n.UID}
+			} else {
+				f.Flags = true
+			}
+		default:
+			f.NewMail = true
+			f.Flags = true
+			f.Membership = true
 		}
-		a.idlePending[w.accountID] = d
+		reason := n.Reason
+		if reason == "" {
+			reason = "idle:" + string(n.Kind)
+		}
+		a.demandLocked(id, w.accountID, f, reason, false, false, now)
 	}
 	a.mu.Unlock()
 	a.Changed()
 }
-
-// A successful local MOVE dirties both sides even when the server sends no
-// unsolicited events for commands issued by this client.
-func (a *App) queueMoveReconcile(accountID string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.ctx.Err() != nil {
-		return
-	}
-	d, exists := a.idlePending[accountID]
-	d.full = true
-	if !exists {
-		d.at = time.Now().UTC()
-		d.trigger = "operation"
-	}
-	a.idlePending[accountID] = d
-}
-
 func (a *App) watchFolder(ctx context.Context, id string, w *idleWatcher, x domain.Account) {
 	failures := 0
+	discoveryRequested := false
 	for ctx.Err() == nil {
-		_, cred, err := a.account(x.ID)
+		current, cred, err := a.account(x.ID)
+		if err == nil && (current.Revision != w.revision || current.Paused) {
+			return
+		}
 		started := time.Now()
 		if err == nil {
-			err = mailer.WatchIMAP(ctx, x.IMAP, cred.IMAP, w.name, func() {
-				// A successful new connection invalidates network retry deadlines.
-				// Keep failure counts until the compensating sync actually commits.
-				_ = a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
-					account, exists := s.Accounts[x.ID]
-					status := s.SyncStatus[x.ID]
-					if !exists || account.Revision != w.revision || account.Paused || status.ErrorKind != "temporary" || status.RetryAt.IsZero() {
-						return nil, nil
+			release, e := a.acquireIMAP(ctx, x, true)
+			err = e
+			if err == nil {
+				err = mailer.WatchIMAP(ctx, x.IMAP, cred.IMAP, w.name, func() {
+					_ = a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
+						account, ok := s.Accounts[x.ID]
+						st := s.SyncStatus[x.ID]
+						if !ok || account.Revision != w.revision || account.Paused || st.ErrorKind != "temporary" || st.RetryAt.IsZero() {
+							return nil, nil
+						}
+						st.RetryAt = time.Time{}
+						return []storage.Op{storage.Put("syncStatus", x.ID, st)}, nil
+					})
+					a.mu.Lock()
+					if a.idleWatchers[id] == w {
+						w.status.State = "listening"
+						w.status.Error = ""
+						w.status.RetryAt = time.Time{}
 					}
-					status.RetryAt = time.Time{}
-					return []storage.Op{storage.Put("syncStatus", x.ID, status)}, nil
+					a.mu.Unlock()
+					a.idleNotice(id, w, mailer.IdleNotice{Kind: mailer.IdleReconcile, Reason: "connection-restored"})
+				}, func(n mailer.IdleNotice) {
+					if ctx.Err() == nil {
+						a.idleNotice(id, w, n)
+					}
 				})
-				a.mu.Lock()
-				if a.idleWatchers[id] == w {
-					w.status.State = "listening"
-					w.status.Error = ""
-					w.status.RetryAt = time.Time{}
-				}
-				a.mu.Unlock()
-				// A fresh selected connection cannot prove what happened offline.
-				a.idleEvent(id, w, mailer.IdleReconcile)
-			}, func(kind mailer.IdleEvent) { a.idleEvent(id, w, kind) })
+				release()
+			}
 		}
 		if ctx.Err() != nil {
 			return
@@ -197,8 +277,18 @@ func (a *App) watchFolder(ctx context.Context, id string, w *idleWatcher, x doma
 		if syncErrorKind(err) == "authentication" {
 			state = "authentication"
 		}
-		if state == "reconnecting" {
-			a.idleEvent(id, w, mailer.IdleReconcile)
+		var ce *mailer.ConnectionError
+		if errors.As(err, &ce) && ce.ConnectionLimit {
+			a.reduceIdle(x.ID)
+		}
+		if !discoveryRequested {
+			var ce *mailer.ConnectionError
+			if errors.As(err, &ce) && ce.Stage == "IDLE 选择文件夹" {
+				discoveryRequested = true
+				a.mu.Lock()
+				a.demandLocked("discover:"+x.ID, x.ID, domain.SyncFolder{}, "folder-unavailable", true, false, time.Now().UTC())
+				a.mu.Unlock()
+			}
 		}
 		delay := idleRetry(failures)
 		a.mu.Lock()
@@ -224,100 +314,75 @@ func (a *App) watchFolder(ctx context.Context, id string, w *idleWatcher, x doma
 		}
 	}
 }
-
-func idleRetry(failures int) time.Duration {
-	base := time.Second * time.Duration(1<<min(max(failures-1, 0), 8))
+func idleRetry(n int) time.Duration {
+	base := time.Second * time.Duration(1<<min(max(n-1, 0), 8))
 	return base + time.Duration(rand.Int64N(int64(base/4)+1))
 }
-
 func (a *App) flushIdle(now time.Time) {
-	// Keep dirty hints until no overlapping task can hide an event behind its
-	// captured UID fence or deletion snapshot. Storms coalesce, never disappear.
-	type request struct {
-		id     string
-		demand idleDemand
-	}
-	var requests []request
 	a.mu.Lock()
-	for id, d := range a.idlePending {
+	pending := map[string]idleDemand{}
+	for key, d := range a.idlePending {
 		if now.Sub(d.at) >= 500*time.Millisecond {
-			requests = append(requests, request{id, d})
+			copy := d
+			copy.folder.UIDs = append([]uint32(nil), d.folder.UIDs...)
+			pending[key] = copy
 		}
 	}
 	a.mu.Unlock()
-	for _, r := range requests {
-		busy, quickBusy, blocked := false, false, false
+	for key, d := range pending {
+		blocked := false
 		a.Store.Read(func(s domain.State, _ storage.Index) {
-			x, ok := s.Accounts[r.id]
-			st := s.SyncStatus[r.id]
+			x, ok := s.Accounts[d.accountID]
+			st := s.SyncStatus[d.accountID]
 			blocked = !ok || x.Paused || st.ErrorKind == "authentication" || now.Before(st.RetryAt)
-			for _, task := range s.SyncTasks {
-				if task.AccountID == r.id && task.Active() {
-					busy = true
-					quickBusy = quickBusy || task.Kind == "quick"
-				}
-			}
 		})
-		if blocked || quickBusy || busy && !r.demand.quick || !a.Store.Writable() {
+		if blocked || !a.Store.Writable() {
 			continue
 		}
-		// Remove before enqueue so events received during admission survive.
 		a.mu.Lock()
-		if current, ok := a.idlePending[r.id]; !ok || current != r.demand {
+		current, ok := a.idlePending[key]
+		if !ok || current.version != d.version && now.Sub(current.at) < 2*time.Second {
 			a.mu.Unlock()
 			continue
 		}
-		kind := "quick"
-		if r.demand.full && !busy {
-			kind = "reconcile"
-		}
-		if kind == "quick" && r.demand.full {
-			remaining := r.demand
-			remaining.quick = false
-			a.idlePending[r.id] = remaining
-		} else {
-			delete(a.idlePending, r.id)
-		}
+		d = current
+		d.folder.UIDs = append([]uint32(nil), current.folder.UIDs...)
+		d.reasons = append([]string(nil), current.reasons...)
+		delete(a.idlePending, key)
 		a.mu.Unlock()
-		requestedAt := time.Now().UTC()
-		trigger := r.demand.trigger
-		if trigger == "" {
-			trigger = "idle"
+		var folders []domain.SyncFolder
+		if d.folder.MailboxID != "" {
+			folders = []domain.SyncFolder{d.folder}
 		}
-		task, err := a.CreateSyncTask(r.id, kind, trigger, "")
-		if err != nil || task.CreatedAt.Before(requestedAt) {
+		if err := a.queueDelta(d.accountID, d.trigger, folders, d.discover, d.recovery, d.reasons...); err != nil {
 			a.mu.Lock()
-			d, exists := a.idlePending[r.id]
-			d.full = d.full || r.demand.full
-			d.quick = d.quick || r.demand.quick
-			if !exists {
-				d.trigger = r.demand.trigger
-			}
-			if !exists {
-				d.at = r.demand.at
-			}
-			a.idlePending[r.id] = d
+			a.demandLocked(key, d.accountID, d.folder, d.trigger, d.discover, d.recovery, d.at)
 			a.mu.Unlock()
 		}
 	}
 }
-
 func (a *App) IdleStatuses() map[string]IdleStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := map[string]IdleStatus{}
+	rank := map[string]int{"listening": 0, "connecting": 1, "reconnecting": 2, "unsupported": 3, "authentication": 4}
+	for id, total := range a.idleTotals {
+		out[id] = IdleStatus{State: "listening", Total: total, Limited: append([]string(nil), a.idleUnwatched[id]...)}
+	}
 	for _, w := range a.idleWatchers {
 		s := out[w.accountID]
-		s.Total++
+		if s.Total == 0 {
+			s.Total++
+		}
 		if w.status.State == "listening" {
 			s.Connected++
 		}
-		if w.status.State != "listening" {
-			// Authentication and unsupported must not be masked by another folder.
-			if s.State != "authentication" && s.State != "unsupported" {
-				s.State = w.status.State
-				s.Error = w.status.Error
-			}
+		if rank[w.status.State] > rank[s.State] {
+			s.State = w.status.State
+			s.Error = w.status.Error
+		}
+		if s.Error == "" {
+			s.Error = w.status.Error
 		}
 		if !w.status.RetryAt.IsZero() && (s.RetryAt.IsZero() || w.status.RetryAt.Before(s.RetryAt)) {
 			s.RetryAt = w.status.RetryAt
@@ -325,16 +390,26 @@ func (a *App) IdleStatuses() map[string]IdleStatus {
 		if w.status.LastEvent.After(s.LastEvent) {
 			s.LastEvent = w.status.LastEvent
 		}
-		if s.Error == "" && w.status.Error != "" {
-			s.Error = w.status.Error
-		}
 		out[w.accountID] = s
 	}
 	for id, s := range out {
-		if s.State == "" {
-			s.State = "listening"
+		if len(s.Limited) > 0 && s.State == "listening" {
+			s.State = "limited"
+			s.Error = "部分目录未实时监听，保留完整对齐更新"
 		}
 		out[id] = s
 	}
 	return out
+}
+
+// Selection is an ephemeral monitoring preference; it never writes mailbox data.
+func (a *App) PreferMailbox(id string) {
+	var b domain.Mailbox
+	a.Store.Read(func(s domain.State, _ storage.Index) { b = s.Mailboxes[id] })
+	if b.ID == "" || b.NoSelect {
+		return
+	}
+	a.mu.Lock()
+	a.idleFocused[b.AccountID] = b.ID
+	a.mu.Unlock()
 }

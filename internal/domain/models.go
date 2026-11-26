@@ -9,6 +9,7 @@ type Endpoint struct {
 	Username string `json:"username"`
 }
 type Account struct {
+	IMAPMaxConnections       int      `json:"imapMaxConnections,omitempty"`
 	SyncScope                string   `json:"syncScope,omitempty"`
 	ReconcileEnabled         *bool    `json:"reconcileEnabled,omitempty"`
 	ReconcileIntervalMinutes int      `json:"reconcileIntervalMinutes,omitempty"`
@@ -26,6 +27,8 @@ type Account struct {
 	Revision                 int      `json:"revision"`
 }
 type Mailbox struct {
+	BaselineVersion  int       `json:"baselineVersion,omitempty"`
+	Initialized      bool      `json:"initialized,omitempty"`
 	NoSelect         bool      `json:"noSelect,omitempty"`
 	LastObservedUID  uint32    `json:"lastObservedUid,omitempty"`
 	LastReconciledAt time.Time `json:"lastReconciledAt,omitempty"`
@@ -107,15 +110,17 @@ type SendJob struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 type Operation struct {
-	ID        string    `json:"id"`
-	AccountID string    `json:"accountId"`
-	MessageID string    `json:"messageId"`
-	Kind      string    `json:"kind"`
-	Value     bool      `json:"value"`
-	Target    string    `json:"target,omitempty"`
-	State     string    `json:"state"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	TargetUIDFloor    uint32    `json:"targetUidFloor,omitempty"`
+	TargetUIDValidity uint32    `json:"targetUidValidity,omitempty"`
+	ID                string    `json:"id"`
+	AccountID         string    `json:"accountId"`
+	MessageID         string    `json:"messageId"`
+	Kind              string    `json:"kind"`
+	Value             bool      `json:"value"`
+	Target            string    `json:"target,omitempty"`
+	State             string    `json:"state"`
+	Error             string    `json:"error,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 type Settings struct {
 	AuthRevision int `json:"authRevision"`

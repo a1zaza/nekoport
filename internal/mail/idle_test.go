@@ -15,27 +15,34 @@ import (
 	"github.com/emersion/go-imap/client"
 )
 
-func TestIdleUpdateClassification(t *testing.T) {
-	for _, tt := range []struct {
-		update client.Update
-		want   IdleEvent
-	}{
-		{&client.MailboxUpdate{}, IdleNewMail},
-		{&client.ExpungeUpdate{SeqNum: 42}, IdleReconcile},
-		{&client.MessageUpdate{Message: &imap.Message{SeqNum: 1}}, IdleReconcile},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Code: imap.CodeUidValidity}}, IdleReconcile},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Code: imap.CodeUidNext}}, IdleReconcile},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Code: imap.CodePermanentFlags}}, IdleReconcile},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Code: imap.CodeReadOnly}}, IdleReconcile},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Code: imap.CodeAlert}}, IdleAlert},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Type: imap.StatusRespNo}}, IdleAlert},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Type: imap.StatusRespBad}}, IdleAlert},
-		{&client.StatusUpdate{Status: &imap.StatusResp{Type: imap.StatusRespOk}}, ""},
-		{&client.StatusUpdate{}, ""},
-	} {
-		if got := classifyIdleUpdate(tt.update); got != tt.want {
-			t.Fatalf("%T: %s != %s", tt.update, got, tt.want)
-		}
+func TestIdleObserverUsesImmutableUIDsAndIgnoresBaseline(t *testing.T) {
+	var notices []IdleNotice
+	baseline := imap.NewMailboxStatus("INBOX", nil)
+	baseline.UidValidity = 1
+	baseline.UidNext = 7
+	baseline.ReadOnly = true
+	observe := newIdleObserver("INBOX", func(n IdleNotice) { notices = append(notices, n) }, baseline)
+	observe(&imap.StatusResp{Tag: "*", Type: imap.StatusRespOk, Code: imap.CodeUidNext, Arguments: []interface{}{uint32(7)}})
+	observe(&imap.StatusResp{Tag: "*", Type: imap.StatusRespOk, Code: imap.CodeUidValidity, Arguments: []interface{}{uint32(1)}})
+	observe(&imap.StatusResp{Tag: "*", Type: imap.StatusRespOk, Code: imap.CodeReadOnly})
+	if len(notices) != 0 {
+		t.Fatal("SELECT baseline became data events", notices)
+	}
+	attrs := []interface{}{imap.RawString("UID"), uint32(42), imap.RawString("FLAGS"), []interface{}{imap.SeenFlag}}
+	observe(&imap.DataResp{Fields: []interface{}{uint32(9), "FETCH", attrs}})
+	attrs[1] = uint32(99)
+	if len(notices) != 1 || notices[0].Kind != IdleFlags || notices[0].UID != 42 || notices[0].UIDValidity != 1 {
+		t.Fatal("FETCH lost immutable UID identity", notices)
+	}
+	observe(&imap.DataResp{Fields: []interface{}{uint32(9), "EXPUNGE"}})
+	observe(&imap.DataResp{Fields: []interface{}{uint32(10), "EXISTS"}})
+	observe(&imap.StatusResp{Tag: "*", Type: imap.StatusRespOk, Code: imap.CodeReadWrite})
+	if notices[1].Kind != IdleReconcile || notices[2].Kind != IdleNewMail || notices[3].Kind != IdleCapabilities {
+		t.Fatal(notices)
+	}
+	observe(&imap.StatusResp{Tag: "*", Type: imap.StatusRespOk, Code: imap.CodeUidValidity, Arguments: []interface{}{uint32(2)}})
+	if notices[4].Kind != IdleReconcile || notices[4].UIDValidity != 2 {
+		t.Fatal("UIDVALIDITY reset lost")
 	}
 }
 

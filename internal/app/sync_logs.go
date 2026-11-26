@@ -51,7 +51,7 @@ func syncRetention(s domain.State, replacements ...domain.SyncTask) []storage.Op
 			continue
 		}
 		group := t.AccountID + "/full"
-		if t.Kind == "quick" {
+		if t.Incremental() {
 			group = t.AccountID + "/quick"
 		}
 		groups[group] = append(groups[group], t)
@@ -230,7 +230,9 @@ func auditSyncCommit(s domain.State, indexes storage.Index, before domain.SyncTa
 		}
 		if f.Phase == "done" && (i >= len(before.Folders) || before.Folders[i].Phase != "done") {
 			message := "目录对齐完成，已核对服务器缺失 UID"
-			if after.Kind == "quick" {
+			if after.Kind == "delta" {
+				message = "目录增量完成，处理指定 UID 与目录变化"
+			} else if after.Kind == "quick" {
 				message = "增量扫描完成，本次不检查远端删除"
 			}
 			appendSyncLog(after, domain.SyncLog{Action: "folder-done", Folder: f.Name, Message: message})

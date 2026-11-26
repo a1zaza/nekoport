@@ -13,6 +13,7 @@ import (
 	"github.com/a1zaza/nekoport/internal/secrets"
 	"github.com/a1zaza/nekoport/internal/storage"
 	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/backend/memory"
 	"github.com/emersion/go-imap/responses"
 	"github.com/emersion/go-imap/server"
 )
@@ -84,6 +85,11 @@ func waitIdle(t *testing.T, a *App, condition func() bool) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	a.Store.Read(func(s domain.State, _ storage.Index) {
+		for _, task := range s.SyncTasks {
+			t.Logf("task %s %s %s discover=%v/%v error=%s folders=%+v", task.Kind, task.Trigger, task.State, task.Discover, task.Discovered, task.Error, task.Folders)
+		}
+	})
 	t.Fatalf("IDLE condition timed out; status=%+v", a.IdleStatuses())
 }
 func idleSettled(a *App, id string) bool {
@@ -102,7 +108,7 @@ func idleSettled(a *App, id string) bool {
 
 func TestIDLECrossFolderMoveFlagsReconnectAndFolderRename(t *testing.T) {
 	ext := &idleExtension{conns: map[string]server.Conn{}}
-	a, x, cred, _, _ := imapFixtureGeneration(t, func(s *server.Server) { s.Enable(ext); ext.enabled = true })
+	a, x, cred, user, _ := imapFixtureGeneration(t, func(s *server.Server) { s.Enable(ext); ext.enabled = true })
 	enabled := false
 	x.Paused = false
 	x.SyncScope = "all"
@@ -172,12 +178,17 @@ func TestIDLECrossFolderMoveFlagsReconnectAndFolderRename(t *testing.T) {
 		a.Store.Read(func(s domain.State, _ storage.Index) { m := s.Messages[moved.ID]; ok = m.Seen && m.Starred })
 		return ok && idleSettled(a, x.ID)
 	})
-	// The return move happens while the source watcher is offline. No events are
+	// The return move happens while both directory watchers are offline. No events are
 	// emitted: reconnect compensation must restore both sides without duplicates.
 	ext.connection(t, "Sent").Close()
+	ext.connection(t, "INBOX").Close()
 	if err = remote.UidCopy(set, "INBOX"); err != nil {
 		t.Fatal(err)
 	}
+	// The memory backend incorrectly reuses UID 1 in an emptied mailbox.
+	// A real IMAP mailbox must allocate above its previous high-water mark.
+	returned, _ := user.GetMailbox("INBOX")
+	returned.(*memory.Mailbox).Messages[0].Uid = 7
 	if err = remote.UidStore(set, imap.AddFlags, []interface{}{imap.DeletedFlag}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -264,20 +275,16 @@ func oneSequence(n uint32) chan uint32 { ch := make(chan uint32, 1); ch <- n; cl
 
 func TestIDLEHintsCoalesceAndSurviveActiveTask(t *testing.T) {
 	a := testApp(t)
-	// Hold both worker slots: all work remains reviewable without opening sockets.
 	a.workerGate <- struct{}{}
 	a.workerGate <- struct{}{}
 	var x domain.Account
 	a.Store.Read(func(s domain.State, _ storage.Index) { x = s.Accounts["account"] })
 	x.Paused = false
-	x.SyncScope = "all"
-	if err := a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
-		return []storage.Op{storage.Put("accounts", x.ID, x)}, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.CreateSyncTask(x.ID, "history", "manual", ""); err != nil {
-		t.Fatal(err)
+	a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
+		return []storage.Op{storage.Put("accounts", x.ID, x), storage.Put("mailboxes", "box", domain.Mailbox{ID: "box", AccountID: x.ID, Name: "INBOX"})}, nil
+	})
+	if _, e := a.CreateSyncTask(x.ID, "history", "manual", ""); e != nil {
+		t.Fatal(e)
 	}
 	w := &idleWatcher{accountID: x.ID}
 	a.idleWatchers["box"] = w
@@ -285,55 +292,41 @@ func TestIDLEHintsCoalesceAndSurviveActiveTask(t *testing.T) {
 		a.idleEvent("box", w, mailer.IdleNewMail)
 		a.idleEvent("box", w, mailer.IdleReconcile)
 	}
-	a.mu.Lock()
-	d := a.idlePending[x.ID]
-	d.at = time.Now().Add(-time.Second)
-	a.idlePending[x.ID] = d
-	a.mu.Unlock()
-	a.flushIdle(time.Now())
+	a.flushIdle(time.Now().Add(time.Second))
 	a.Store.Read(func(s domain.State, _ storage.Index) {
 		if len(s.SyncTasks) != 2 {
-			t.Fatal("new mail did not preempt history", len(s.SyncTasks))
+			t.Fatal("event storm duplicated tasks", len(s.SyncTasks))
 		}
-	})
-	if !a.idlePending[x.ID].full {
-		t.Fatal("deletion hint was lost during history")
-	}
-	a.flushIdle(time.Now())
-	a.Store.Read(func(s domain.State, _ storage.Index) {
-		if len(s.SyncTasks) != 2 {
-			t.Fatal("event storm queued duplicate work")
-		}
-	})
-	a.idleEvent("box", w, mailer.IdleNewMail)
-	a.flushIdle(time.Now().Add(time.Second))
-	if !a.idlePending[x.ID].quick {
-		t.Fatal("event during quick was lost")
-	}
-	a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
-		var ops []storage.Op
-		for id, task := range s.SyncTasks {
-			task.State = "succeeded"
-			ops = append(ops, storage.Put("syncTasks", id, task))
-		}
-		return ops, nil
-	})
-	a.flushIdle(time.Now().Add(time.Second))
-	if len(a.idlePending) != 0 {
-		t.Fatal("completed tasks did not release pending reconciliation")
-	}
-	a.Store.Read(func(s domain.State, _ storage.Index) {
-		n := 0
 		for _, task := range s.SyncTasks {
-			if task.Active() {
-				n++
-				if task.Kind != "reconcile" || task.Trigger != "idle" {
-					t.Fatal(task)
+			if task.Kind == "delta" {
+				if len(task.Folders) != 1 || !task.Folders[0].NewMail || !task.Folders[0].Membership {
+					t.Fatal("lost hints", task)
 				}
 			}
 		}
-		if n != 1 {
-			t.Fatal("missing reconciliation", n)
+	})
+	// New events after a task was claimed must create a separate follow-up.
+	a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
+		var ops []storage.Op
+		for id, task := range s.SyncTasks {
+			if task.Kind == "delta" {
+				task.State = "running"
+				ops = append(ops, storage.Put("syncTasks", id, task))
+			}
+		}
+		return ops, nil
+	})
+	a.idleEvent("box", w, mailer.IdleNewMail)
+	a.flushIdle(time.Now().Add(time.Second))
+	a.Store.Read(func(s domain.State, _ storage.Index) {
+		n := 0
+		for _, task := range s.SyncTasks {
+			if task.Kind == "delta" {
+				n++
+			}
+		}
+		if n != 2 {
+			t.Fatal("active task swallowed event")
 		}
 	})
 }
@@ -447,7 +440,7 @@ func TestIDLEAuthenticationStopsAndConfigurationRestoresConnection(t *testing.T)
 		ok := false
 		a.Store.Read(func(s domain.State, _ storage.Index) {
 			status := s.SyncStatus[x.ID]
-			ok = status.Failures == 0 && status.RetryAt.IsZero() && !status.LastFull.IsZero()
+			ok = status.Failures == 0 && status.RetryAt.IsZero() && !status.LastQuick.IsZero()
 		})
 		return ok && a.IdleStatuses()[x.ID].Connected == 3 && idleSettled(a, x.ID)
 	})

@@ -16,10 +16,11 @@ import (
 
 // ConnectionError preserves the failing stage without exposing authentication data.
 type ConnectionError struct {
-	Protocol  string
-	Stage     string
-	Retryable bool
-	message   string
+	Protocol        string
+	Stage           string
+	ConnectionLimit bool
+	Retryable       bool
+	message         string
 }
 
 func (e *ConnectionError) Error() string { return e.message }
@@ -33,6 +34,9 @@ func connectionError(protocol, stage string, cause error, username, password str
 	if errors.As(cause, &status) && status.Code >= 400 && status.Code < 500 {
 		retryable = true
 	}
+	reply := strings.ToLower(cause.Error())
+	limited := strings.Contains(reply, "too many connections") || strings.Contains(reply, "connection limit") || strings.Contains(reply, "maximum number of connections") || strings.Contains(reply, "userip_connections")
+	retryable = retryable || limited || strings.Contains(reply, "temporarily unavailable")
 	label := protocol + " " + stage + "失败"
 	if stage == "认证" {
 		if retryable {
@@ -41,7 +45,7 @@ func connectionError(protocol, stage string, cause error, username, password str
 			label = protocol + " 认证失败（用户名、密码或账号策略被拒绝）"
 		}
 	}
-	return &ConnectionError{Protocol: protocol, Stage: stage, Retryable: retryable, message: label + "：" + redactReply(cause.Error(), username, password)}
+	return &ConnectionError{Protocol: protocol, Stage: stage, ConnectionLimit: limited, Retryable: retryable, message: label + "：" + redactReply(cause.Error(), username, password)}
 }
 func redactReply(message, username, password string) string {
 	values := []string{username, password}

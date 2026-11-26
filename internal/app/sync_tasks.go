@@ -48,8 +48,10 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 			}
 			if task.Active() {
 				copy := task.Clone()
-				if task.Kind == "quick" {
-					quick = &copy
+				if task.Incremental() {
+					if quick == nil || task.Kind == "quick" {
+						quick = &copy
+					}
 				} else {
 					primary = &copy
 				}
@@ -64,7 +66,7 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 		}
 		// An automatic quick task may queue beside a historical task, but the account
 		// worker still executes one batch at a time and always drains quick first.
-		auxiliary := kind == "quick" && (trigger == "timer" || trigger == "idle") && primary != nil && quick == nil
+		auxiliary := kind == "quick" && (primary != nil || quick != nil && quick.Kind == "delta") && (quick == nil || quick.Kind != "quick")
 		if active != nil && !auxiliary {
 			result = active.Clone()
 			if kind == "history" && result.Kind != "history" {
@@ -72,13 +74,16 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 				result.RecentDays = x.SyncDays
 				appendSyncLog(&result, domain.SyncLog{Action: "upgraded", Message: "任务升级为全历史同步，重新枚举"})
 				result.Kind = "history"
+				result.ScopeType = "account"
+				result.Discover = false
+				result.Recovery = false
 				result.AccountRevision = x.Revision
 				result.Generation = storage.ID()
 				result.Folders = nil
 				result.Discovered = false
 				result.UpdatedAt = now
 				ops = append(ops, storage.Put("syncTasks", result.ID, result))
-			} else if kind == "reconcile" && result.Kind == "quick" {
+			} else if kind == "reconcile" && result.Incremental() {
 				st := s.SyncStatus[accountID]
 				st.AccountID = accountID
 				st.PendingReconcile = true
@@ -87,7 +92,7 @@ func (a *App) CreateSyncTask(accountID, kind, trigger, requestKey string) (domai
 			return ops, nil
 		}
 
-		result = domain.SyncTask{ID: storage.ID(), Generation: storage.ID(), AccountID: accountID, Kind: kind, Trigger: trigger, RequestKey: requestKey, State: "queued", AccountRevision: x.Revision, CreatedAt: now, UpdatedAt: now, LogVersion: 1, Scope: x.Scope(), RecentDays: x.SyncDays}
+		result = domain.SyncTask{ScopeType: "account", ID: storage.ID(), Generation: storage.ID(), AccountID: accountID, Kind: kind, Trigger: trigger, RequestKey: requestKey, State: "queued", AccountRevision: x.Revision, CreatedAt: now, UpdatedAt: now, LogVersion: 1, Scope: x.Scope(), RecentDays: x.SyncDays}
 		appendSyncLog(&result, domain.SyncLog{Action: "created", Message: "同步任务已创建"})
 		st := s.SyncStatus[accountID]
 		st.AccountID = accountID
@@ -148,7 +153,19 @@ func (a *App) SyncTaskAction(id, action string) error {
 				ops = append(ops, storage.Put("accounts", x.ID, x))
 			}
 			if t.AccountRevision != x.Revision {
-				t.Folders = nil
+				if t.Kind == "delta" {
+					for i := range t.Folders {
+						t.Folders[i].Phase = "init"
+						t.Folders[i].UIDs = nil
+						t.Folders[i].NewMail = true
+						t.Folders[i].Flags = true
+						t.Folders[i].Membership = true
+						t.Folders[i].SnapshotAt = time.Time{}
+						t.Folders[i].CheckedUID = 0
+					}
+				} else {
+					t.Folders = nil
+				}
 				t.Discovered = false
 				t.Generation = storage.ID()
 				t.AccountRevision = x.Revision
@@ -164,6 +181,7 @@ func (a *App) SyncTaskAction(id, action string) error {
 			t.RecentDays = x.SyncDays
 			appendSyncLog(&t, domain.SyncLog{Action: "resumed", Message: "继续任务，统计累计已提交结果"})
 			t.State = "queued"
+			t.RetryAt = time.Time{}
 			t.Error = ""
 			t.FinishedAt = time.Time{}
 		} else {
@@ -229,7 +247,7 @@ func (a *App) scheduleSync(now time.Time) {
 			}
 			var active *domain.SyncTask
 			for _, v := range s.SyncTasks {
-				if v.AccountID == id && v.Active() && (active == nil || v.Kind == "quick") {
+				if v.AccountID == id && v.Active() && !now.Before(v.RetryAt) && (active == nil || v.Incremental()) {
 					copy := v
 					active = &copy
 				}
@@ -307,14 +325,30 @@ func (a *App) advanceSyncTask(x domain.Account, cred secrets.Credentials) bool {
 	if !a.Store.Writable() {
 		return false
 	}
-	var t domain.SyncTask
+	var t, incremental, full domain.SyncTask
 	a.Store.Read(func(s domain.State, _ storage.Index) {
 		for _, v := range s.SyncTasks {
-			if v.AccountID == x.ID && v.Active() && (t.ID == "" || v.Kind == "quick") {
-				t = v.Clone()
+			if v.AccountID != x.ID || !v.Active() || time.Now().Before(v.RetryAt) {
+				continue
+			}
+			if v.Incremental() {
+				if incremental.ID == "" || v.CreatedAt.Before(incremental.CreatedAt) {
+					incremental = v.Clone()
+				}
+			} else if full.ID == "" || v.CreatedAt.Before(full.CreatedAt) {
+				full = v.Clone()
 			}
 		}
 	})
+	a.mu.Lock()
+	preferFull := a.syncTurn[x.ID]
+	a.syncTurn[x.ID] = !preferFull
+	a.mu.Unlock()
+	t = incremental
+	if t.ID == "" || preferFull && full.ID != "" {
+		t = full
+	}
+
 	if t.ID == "" {
 		return false
 	}
@@ -331,7 +365,19 @@ func (a *App) advanceSyncTask(x domain.Account, cred secrets.Credentials) bool {
 			appendSyncLog(&v, domain.SyncLog{Action: "restarted", Message: "邮箱配置变化，重新枚举；保留累计统计"})
 			v.Generation = storage.ID()
 			v.Discovered = false
-			v.Folders = nil
+			if v.Kind == "delta" {
+				for i := range v.Folders {
+					v.Folders[i].Phase = "init"
+					v.Folders[i].UIDs = nil
+					v.Folders[i].NewMail = true
+					v.Folders[i].Flags = true
+					v.Folders[i].Membership = true
+					v.Folders[i].SnapshotAt = time.Time{}
+					v.Folders[i].CheckedUID = 0
+				}
+			} else {
+				v.Folders = nil
+			}
 			v.State = "queued"
 			v.UpdatedAt = time.Now().UTC()
 			return []storage.Op{storage.Put("syncTasks", v.ID, v)}, nil
@@ -344,7 +390,7 @@ func (a *App) advanceSyncTask(x domain.Account, cred secrets.Credentials) bool {
 	a.taskCancels[t.ID] = cancel
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.taskCancels, t.ID); a.mu.Unlock() }()
-	c, err := mailer.DialIMAP(ctx, x.IMAP, cred.IMAP)
+	c, err := a.dialIMAP(ctx, x, cred.IMAP)
 	if err != nil {
 		a.failSync(t, -1, err)
 		return false
@@ -373,7 +419,7 @@ func (a *App) advanceSyncTask(x domain.Account, cred secrets.Credentials) bool {
 	var active bool
 	a.Store.Read(func(s domain.State, _ storage.Index) {
 		for _, v := range s.SyncTasks {
-			if v.AccountID == x.ID && v.Active() {
+			if v.AccountID == x.ID && v.Active() && !time.Now().Before(v.RetryAt) {
 				active = true
 			}
 		}
@@ -391,6 +437,9 @@ func listFolders(c *client.Client) ([]*imap.MailboxInfo, error) {
 	return infos, <-done
 }
 func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) error {
+	if t.Kind == "delta" {
+		return a.deltaStep(c, x, t)
+	}
 	before := t.Clone()
 	t = t.Clone() // failed commits must not advance the caller's recovery cursor
 	t.State = "running"
@@ -482,6 +531,10 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 			var stale []string
 			a.Store.Read(func(s domain.State, i storage.Index) {
 				box = s.Mailboxes[f.MailboxID]
+				if before.Folders[idx].SnapshotAt.IsZero() {
+					f.Initial = box.UIDValidity != f.UIDValidity || !box.HasBaseline()
+					f.BaselineUID = box.LastObservedUID
+				}
 				for _, id := range i.Folders[f.MailboxID] {
 					if s.Messages[id].UIDValidity != f.UIDValidity {
 						stale = append(stale, id)
@@ -493,6 +546,8 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 			})
 			if box.UIDValidity != f.UIDValidity {
 				box.LastObservedUID = 0
+				box.Initialized = false
+				box.BaselineVersion = 1
 			}
 			box.UIDValidity = f.UIDValidity
 			if len(stale) == 0 {
@@ -501,7 +556,7 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 					baseline := box.LastObservedUID
 					a.Store.Read(func(s domain.State, _ storage.Index) {
 						for _, primary := range s.SyncTasks {
-							if primary.AccountID == x.ID && primary.Kind != "quick" && primary.Active() {
+							if primary.AccountID == x.ID && !primary.Incremental() && primary.Active() {
 								base := f.UpperUID
 								for _, pf := range primary.Folders {
 									if pf.MailboxID == f.MailboxID && pf.UIDValidity == f.UIDValidity {
@@ -536,7 +591,7 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 			}
 			end := min(f.NextUID+9999, uint64(f.UpperUID))
 			criteria := imap.NewSearchCriteria()
-			if t.Kind == "quick" && x.Scope() == "recent" {
+			if t.Kind == "quick" && x.Scope() == "recent" && (f.Initial || t.ScopeType == "") {
 				criteria.Since = time.Now().AddDate(0, 0, -x.SyncDays)
 			}
 			criteria.Uid = new(imap.SeqSet)
@@ -605,13 +660,14 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 								}
 							}
 						}
-					} else if x.Scope() != "all" && m.InternalDate.Before(time.Now().AddDate(0, 0, -x.SyncDays)) {
+					} else if x.Scope() != "all" && (f.Initial || t.ScopeType == "" || m.Uid <= f.BaselineUID) && m.InternalDate.Before(time.Now().AddDate(0, 0, -x.SyncDays)) {
 						continue
 					}
 					value.LastSeenGeneration = t.Generation
 					ops = append(ops, storage.Put("messages", value.ID, value))
 				}
 				if f.NextUID > uint64(f.UpperUID) {
+					box.Initialized = true
 					box.LastObservedUID = max(box.LastObservedUID, f.UpperUID)
 					ops = append(ops, storage.Put("mailboxes", box.ID, box))
 				}
@@ -667,6 +723,7 @@ func (a *App) syncStep(c *client.Client, x domain.Account, t domain.SyncTask) er
 				if f.Phase == "done" {
 					box := s.Mailboxes[f.MailboxID]
 					box.LastReconciledAt = time.Now().UTC()
+					box.Initialized = true
 					box.LastObservedUID = max(box.LastObservedUID, f.UpperUID)
 					ops = append(ops, storage.Put("mailboxes", box.ID, box))
 				}
@@ -807,6 +864,13 @@ func syncErrorKind(err error) string {
 func (a *App) failSync(t domain.SyncTask, folder int, err error) error {
 	after := t.Clone()
 	after.Error = cleanError(err)
+	if t.Kind == "delta" && syncErrorKind(err) != "authentication" {
+		after.Failures++
+		after.State = "queued"
+		after.RetryAt = nextRetry(after.Failures, time.Now().UTC())
+		appendSyncLog(&after, domain.SyncLog{Action: "retry", Message: "目录增量暂不可用，退避后重试：" + after.Error})
+		return a.taskCommit(t, after, nil)
+	}
 	if folder >= 0 {
 		after.Folders[folder].Phase = "failed"
 		after.Folders[folder].Error = after.Error

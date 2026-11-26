@@ -19,6 +19,12 @@ import (
 )
 
 type App struct {
+	idleFocused      map[string]string
+	imapUsage        map[string]*imapUsage
+	idleLimits       map[string]int
+	idleTotals       map[string]int
+	idleUnwatched    map[string][]string
+	syncTurn         map[string]bool
 	idleWatchers     map[string]*idleWatcher
 	idleAccounts     map[string]int
 	idlePending      map[string]idleDemand
@@ -41,7 +47,7 @@ type App struct {
 
 func New(s *storage.Store, v *secrets.Vault) *App {
 	ctx, c := context.WithCancel(context.Background())
-	return &App{idleWatchers: map[string]*idleWatcher{}, idleAccounts: map[string]int{}, idlePending: map[string]idleDemand{}, taskCancels: map[string]context.CancelFunc{}, delivery: map[string]bool{}, Store: s, Vault: v, ctx: ctx, cancel: c, running: map[string]bool{}, listeners: map[chan string]bool{}, contentGate: make(chan struct{}, 2), pending: map[string]bool{}, workerGate: make(chan struct{}, 2)}
+	return &App{idleFocused: map[string]string{}, imapUsage: map[string]*imapUsage{}, idleLimits: map[string]int{}, idleTotals: map[string]int{}, idleUnwatched: map[string][]string{}, syncTurn: map[string]bool{}, idleWatchers: map[string]*idleWatcher{}, idleAccounts: map[string]int{}, idlePending: map[string]idleDemand{}, taskCancels: map[string]context.CancelFunc{}, delivery: map[string]bool{}, Store: s, Vault: v, ctx: ctx, cancel: c, running: map[string]bool{}, listeners: map[chan string]bool{}, contentGate: make(chan struct{}, 2), pending: map[string]bool{}, workerGate: make(chan struct{}, 2)}
 }
 func (a *App) Start() { // Any interrupted SMTP attempt must be confirmed manually, never replayed.
 	a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
@@ -65,6 +71,17 @@ func (a *App) Start() { // Any interrupted SMTP attempt must be confirmed manual
 				o.State = "failed"
 				o.Error = "上次操作被中断，请同步核对后重试"
 				ops = append(ops, storage.Put("operations", id, o))
+				if o.TargetUIDFloor > 0 {
+					source := s.Messages[o.MessageID].MailboxID
+					var folders []domain.SyncFolder
+					if source != "" {
+						folders = append(folders, domain.SyncFolder{MailboxID: source, NewMail: true, Membership: true})
+					}
+					if o.Target != "" {
+						folders = append(folders, domain.SyncFolder{MailboxID: o.Target, NewMail: true, ActivityFrom: o.TargetUIDFloor, ActivityValidity: o.TargetUIDValidity})
+					}
+					ops = append(ops, deltaOps(s, o.AccountID, "operation:move-recovery", folders, false, false)...)
+				}
 			}
 		}
 		return ops, nil
@@ -276,6 +293,12 @@ func (a *App) SaveAccount(x domain.Account, imapPass, smtpPass string) (domain.A
 	}
 	if x.ReconcileEnabled == nil {
 		x.ReconcileEnabled = old.ReconcileEnabled
+	}
+	if x.IMAPMaxConnections == 0 {
+		x.IMAPMaxConnections = imapLimit(old)
+	}
+	if x.IMAPMaxConnections < 4 || x.IMAPMaxConnections > 50 {
+		return x, errors.New("IMAP 连接上限范围为 4–50")
 	}
 	x.CredentialRef = ref
 	x.Revision++
@@ -489,7 +512,7 @@ func (a *App) ContentContext(ctx context.Context, id string) (domain.Message, do
 	}
 	var box domain.Mailbox
 	a.Store.Read(func(s domain.State, _ storage.Index) { box = s.Mailboxes[m.MailboxID] })
-	c, e := mailer.DialIMAP(ctx, x.IMAP, cred.IMAP)
+	c, e := a.dialIMAP(ctx, x, cred.IMAP)
 	if e != nil {
 		return m, domain.Content{}, e
 	}
@@ -693,6 +716,14 @@ func (a *App) job(j domain.SendJob) error {
 			return nil, storage.ErrConflict
 		}
 		ops := []storage.Op{storage.Put("jobs", j.ID, j)}
+		if j.State == "sent" && (j.Archive == "saved" || j.Archive == "server" || j.Archive == "unknown") {
+			sent := sentFolder(s, j.AccountID)
+			var folders []domain.SyncFolder
+			if sent.ID != "" {
+				folders = []domain.SyncFolder{{MailboxID: sent.ID, Name: sent.Name, NewMail: true}}
+			}
+			ops = append(ops, deltaOps(s, j.AccountID, "send:sent", folders, sent.ID == "", false)...)
+		}
 		if j.State == "sent" && old.State == "submitting" {
 			ops = append(ops, storage.Del("drafts", j.DraftID))
 		}
@@ -753,18 +784,24 @@ func (a *App) sendJobs(x domain.Account, c secrets.Credentials) {
 			j.Archive = "server"
 		} else {
 			var sent domain.Mailbox
-			a.Store.Read(func(s domain.State, _ storage.Index) {
-				for _, b := range s.Mailboxes {
-					if b.AccountID == x.ID && b.Role == "sent" {
-						sent = b
+			a.Store.Read(func(s domain.State, _ storage.Index) { sent = sentFolder(s, x.ID) })
+			if sent.ID == "" {
+				if err := a.discoverSent(x, c.IMAP); err != nil {
+					j.Archive = "failed"
+					j.Error = "邮件已发送，发现已发送目录失败：" + cleanError(err)
+					if a.job(j) != nil {
+						return
 					}
+					a.Changed()
+					continue
 				}
-			})
+				a.Store.Read(func(s domain.State, _ storage.Index) { sent = sentFolder(s, x.ID) })
+			}
 			if sent.ID == "" {
 				j.Archive = "failed"
 				j.Error = "邮件已发送，未找到已发送文件夹，归档失败"
 			} else {
-				conn, err := mailer.DialIMAP(a.ctx, x.IMAP, c.IMAP)
+				conn, err := a.dialIMAP(a.ctx, x, c.IMAP)
 				if err == nil {
 					j.Archive = "submitting"
 					if e := a.job(j); e != nil {
@@ -881,7 +918,7 @@ func (a *App) processOperations(x domain.Account, cred secrets.Credentials) {
 		if m.ID == "" {
 			e = errors.New("邮件已不存在")
 		} else {
-			c, err := mailer.DialIMAP(a.ctx, x.IMAP, cred.IMAP)
+			c, err := a.dialIMAP(a.ctx, x, cred.IMAP)
 			e = err
 			if e == nil {
 				status, err := c.Select(box.Name, false)
@@ -909,7 +946,43 @@ func (a *App) processOperations(x domain.Account, cred secrets.Credentials) {
 						} else if !supported {
 							e = errors.New("服务器不支持安全 UID MOVE，未执行复制或全局清除")
 						} else {
-							e = c.UidMove(set, target.Name)
+							targetStatus, statusErr := c.Status(target.Name, []imap.StatusItem{imap.StatusUidNext, imap.StatusUidValidity})
+							if statusErr == nil && (targetStatus == nil || targetStatus.UidNext == 0 || targetStatus.UidValidity == 0) {
+								targetStatus, statusErr = c.Select(target.Name, true)
+								if statusErr == nil {
+									var upper uint32
+									upper, statusErr = syncUpperUID(c, targetStatus)
+									if upper == ^uint32(0) {
+										statusErr = errors.New("目标目录 UID 已耗尽")
+									}
+									targetStatus.UidNext = upper + 1
+								}
+								if statusErr == nil {
+									var source *imap.MailboxStatus
+									source, statusErr = c.Select(box.Name, false)
+									if statusErr == nil && source.UidValidity != m.UIDValidity {
+										statusErr = errors.New("来源 UIDVALIDITY 已变化，未移动")
+									}
+								}
+							}
+							if statusErr == nil && (targetStatus == nil || targetStatus.UidNext == 0 || targetStatus.UidValidity == 0) {
+								statusErr = errors.New("目标目录缺少有效 UID 基线，未移动")
+							}
+							if statusErr == nil {
+								o.TargetUIDFloor = targetStatus.UidNext
+								o.TargetUIDValidity = targetStatus.UidValidity
+								statusErr = a.Store.Update(func(s domain.State, _ storage.Index) ([]storage.Op, error) {
+									if s.Operations[o.ID].State != "running" || s.Accounts[x.ID].Revision != x.Revision {
+										return nil, storage.ErrConflict
+									}
+									return []storage.Op{storage.Put("operations", o.ID, o)}, nil
+								})
+							}
+							if statusErr == nil {
+								e = c.UidMove(set, target.Name)
+							} else {
+								e = statusErr
+							}
 							removed = e == nil
 						}
 					}
@@ -929,11 +1002,11 @@ func (a *App) processOperations(x domain.Account, cred secrets.Credentials) {
 			if removed {
 				ops = append(ops, storage.Del("messages", m.ID))
 			}
+			if o.TargetUIDFloor > 0 {
+				ops = append(ops, deltaOps(s, x.ID, "operation:move", []domain.SyncFolder{{MailboxID: box.ID, Name: box.Name, NewMail: true, Membership: true}, {MailboxID: target.ID, Name: target.Name, NewMail: true, ActivityFrom: o.TargetUIDFloor, ActivityValidity: o.TargetUIDValidity}}, false, false)...)
+			}
 			return ops, nil
 		})
-		if removed {
-			a.queueMoveReconcile(x.ID)
-		}
 		a.Changed()
 	}
 }
@@ -950,7 +1023,7 @@ func (a *App) Check(ctx context.Context, x domain.Account, imapPass, smtpPass st
 		}
 	}
 	out := map[string]string{}
-	if c, e := mailer.DialIMAP(ctx, x.IMAP, imapPass); e != nil {
+	if c, e := a.dialIMAP(ctx, x, imapPass); e != nil {
 		out["imap"] = cleanError(e)
 	} else {
 		c.Terminate()

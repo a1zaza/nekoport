@@ -207,6 +207,24 @@ export function AccountEditor({
                 }
               />
             </Field>
+            <Field label="IMAP 连接上限（4–50）">
+              <input
+                type="number"
+                min={4}
+                max={50}
+                required
+                value={value.imapMaxConnections || 10}
+                onChange={(e) =>
+                  setValue({
+                    ...value,
+                    imapMaxConnections: Number(e.target.value),
+                  })
+                }
+              />
+              <small className="muted">
+                默认 10，预留 3 个连接用于邮件操作与正文读取。
+              </small>
+            </Field>
             <div className="account-options">
               <label className="check">
                 <input

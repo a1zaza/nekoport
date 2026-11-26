@@ -18,7 +18,9 @@ const names: Record<string, string> = {
   partial_failed: "部分失败",
   failed: "失败",
   cancelled: "已取消",
-  quick: "快速同步",
+  quick: "增量同步",
+  delta: "目录增量",
+  flags: "标记与存在性核对",
   history: "全历史同步",
   reconcile: "完整对齐",
   init: "等待处理",
@@ -30,6 +32,20 @@ const names: Record<string, string> = {
 };
 const stamp = (value?: string) =>
   value && !value.startsWith("0001-") ? time(value, true) : "尚无记录";
+const reasonLabel = (reason: string) =>
+  ({
+    "idle:exists": "新邮件通知",
+    "idle:recent": "近期邮件通知",
+    "idle:fetch": "标记变化",
+    "idle:expunge": "删除通知",
+    "idle:uidnext": "新增 UID 通知",
+    "idle:uidvalidity": "目录身份变化",
+    "connection-restored": "连接恢复补偿",
+    "folder-unavailable": "目录存在性检查",
+    "send:sent": "发送后更新已发送目录",
+    "operation:move": "移动两端更新",
+    startup: "启动恢复",
+  })[reason] || "增量事件";
 const triggerNames: Record<string, string> = {
   timer: "定时触发",
   idle: "IDLE 事件触发",
@@ -141,11 +157,15 @@ export function SyncPanel({
     return result;
   }
   const fullActive = tasks.some(
-    (t) => t.kind !== "quick" && ["queued", "running"].includes(t.state),
+    (t) =>
+      !["quick", "delta"].includes(t.kind) &&
+      ["queued", "running"].includes(t.state),
   );
   const active = tasks.some((t) => ["queued", "running"].includes(t.state));
   const groupedTasks = tasks.filter((t) =>
-    logGroup === "quick" ? t.kind === "quick" : t.kind !== "quick",
+    logGroup === "quick"
+      ? ["quick", "delta"].includes(t.kind)
+      : !["quick", "delta"].includes(t.kind),
   );
   return (
     <section
@@ -202,7 +222,8 @@ export function SyncPanel({
         </button>
       </form>
       <p className="muted sync-scope-note">
-        同步全部历史邮件列表，正文及附件查看时加载，不是离线备份。对齐只更新本地索引，不会删除服务器邮件。
+        历史补录范围用于初始化与完整对齐，新发生的目录活动按 UID
+        更新，移动旧邮件也会导入。正文及附件查看时加载，不是离线备份；对齐不会删除服务器邮件。
       </p>
       <dl className="sync-times">
         <div>
@@ -216,6 +237,7 @@ export function SyncPanel({
                     listening: "IDLE 监听中",
                     connecting: "正在连接",
                     reconnecting: "断线重连中",
+                    limited: "部分目录未实时监听",
                     unsupported: "服务器不支持 IDLE",
                     authentication: "认证失败，修改连接信息后重试",
                   }[idle?.state || ""] || "等待建立 IDLE 连接"}
@@ -224,6 +246,12 @@ export function SyncPanel({
               : ""}
           </dd>
         </div>
+        {!!idle?.limitedFolders?.length && !account.paused && (
+          <p className="muted">
+            未实时监听：{idle.limitedFolders.join("、")}
+            。由手动同步或完整对齐更新。
+          </p>
+        )}
         {idle?.error && !account.paused && (
           <div>
             <dt>IDLE 提示</dt>
@@ -236,6 +264,10 @@ export function SyncPanel({
           </div>
         )}
 
+        <div>
+          <dt>最近增量更新</dt>
+          <dd>{stamp(status?.lastQuickSuccessAt)}</dd>
+        </div>
         <div>
           <dt>最近完整对齐</dt>
           <dd>{stamp(status?.lastFullSuccessAt)}</dd>
@@ -314,7 +346,7 @@ export function SyncPanel({
         <div className="sync-log-tabs" role="tablist" aria-label="同步日志分类">
           {[
             { id: "full", label: "完整对齐" },
-            { id: "quick", label: "快速同步" },
+            { id: "quick", label: "增量同步" },
           ].map((group) => (
             <button
               key={group.id}
@@ -350,8 +382,8 @@ export function SyncPanel({
                 {
                   tasks.filter((t) =>
                     group.id === "quick"
-                      ? t.kind === "quick"
-                      : t.kind !== "quick",
+                      ? ["quick", "delta"].includes(t.kind)
+                      : !["quick", "delta"].includes(t.kind),
                   ).length
                 }
               </small>
@@ -368,11 +400,11 @@ export function SyncPanel({
             每类保留最近 5 次已结束任务，进行中与暂停任务另行保留。
             {logGroup === "full"
               ? "全历史同步归入完整对齐。"
-              : "快速同步由 IDLE 新邮件事件或手动触发；删除与标记事件会触发完整对齐。"}
+              : "IDLE 按目录或 UID 更新新增、标记与删除；不会触发全账号完整对齐。"}
           </p>
           {!groupedTasks.length && (
             <p className="muted">
-              暂无{logGroup === "full" ? "完整对齐" : "快速同步"}记录。
+              暂无{logGroup === "full" ? "完整对齐" : "增量同步"}记录。
             </p>
           )}
 
@@ -441,9 +473,19 @@ export function SyncPanel({
                 )}
                 <p className="muted">
                   {stamp(t.createdAt)} ·{" "}
-                  {triggerNames[t.trigger || ""] || "触发来源未记录"}
+                  {triggerNames[t.trigger || ""] ||
+                    reasonLabel(t.trigger || "")}
+                  {t.scopeType &&
+                    ` · 范围：${t.scopeType === "account" ? "整个账号" : t.scopeType === "uids" ? "指定 UID" : "指定目录"}`}
+                  {!!t.reasons?.length &&
+                    ` · ${t.reasons.map(reasonLabel).join("、")}`}
                 </p>
-                {t.error && <p className="danger">{t.error}</p>}
+                {t.error && (
+                  <p className="danger">
+                    {t.error}
+                    {t.retryAt ? ` · 重试 ${stamp(t.retryAt)}` : ""}
+                  </p>
+                )}
                 {expanded === t.id && (
                   <div className="sync-task-details">
                     <dl className="sync-log-times">

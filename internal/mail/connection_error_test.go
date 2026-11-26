@@ -44,3 +44,11 @@ func TestAuthenticationTransportFailureIsNotPasswordRejection(t *testing.T) {
 		t.Fatal("temporary server failure mislabeled as password rejection")
 	}
 }
+
+func TestConnectionQuotaIsNotAuthenticationRejection(t *testing.T) {
+	e := connectionError("IMAP", "认证", errors.New("Too many connections for this account"), "user", "secret")
+	var detail *ConnectionError
+	if !errors.As(e, &detail) || !detail.ConnectionLimit || !detail.Retryable || strings.Contains(e.Error(), "认证失败") {
+		t.Fatal("quota was treated as wrong password", e)
+	}
+}

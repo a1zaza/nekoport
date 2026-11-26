@@ -994,7 +994,7 @@ function App() {
                           {j.archive === "saved"
                             ? "已保存到已发送文件夹"
                             : j.archive === "server"
-                              ? "由服务器归档"
+                              ? "由服务器保存，尚未核实"
                               : j.archive === "confirmed"
                                 ? "已由用户确认"
                                 : "归档状态：" + j.archive}

@@ -3,18 +3,27 @@ package domain
 import "time"
 
 type SyncFolder struct {
-	SnapshotAt  time.Time    `json:"snapshotAt,omitempty"`
-	LocalBefore int          `json:"localBefore"`
-	RemoteTotal uint32       `json:"remoteTotal"`
-	Stats       SyncCounters `json:"stats"`
-	MailboxID   string       `json:"mailboxId"`
-	Name        string       `json:"name"`
-	UIDValidity uint32       `json:"uidValidity"`
-	UpperUID    uint32       `json:"upperUid"`
-	NextUID     uint64       `json:"nextUid"`
-	Phase       string       `json:"phase"`
-	Processed   int          `json:"processed"`
-	Error       string       `json:"error,omitempty"`
+	ActivityFrom     uint32       `json:"activityFrom,omitempty"`
+	ActivityValidity uint32       `json:"activityValidity,omitempty"`
+	BaselineUID      uint32       `json:"baselineUid,omitempty"`
+	NewMail          bool         `json:"newMail,omitempty"`
+	Flags            bool         `json:"flags,omitempty"`
+	Membership       bool         `json:"membership,omitempty"`
+	UIDs             []uint32     `json:"uids,omitempty"`
+	CheckedUID       uint32       `json:"checkedUid,omitempty"`
+	Initial          bool         `json:"initial,omitempty"`
+	SnapshotAt       time.Time    `json:"snapshotAt,omitempty"`
+	LocalBefore      int          `json:"localBefore"`
+	RemoteTotal      uint32       `json:"remoteTotal"`
+	Stats            SyncCounters `json:"stats"`
+	MailboxID        string       `json:"mailboxId"`
+	Name             string       `json:"name"`
+	UIDValidity      uint32       `json:"uidValidity"`
+	UpperUID         uint32       `json:"upperUid"`
+	NextUID          uint64       `json:"nextUid"`
+	Phase            string       `json:"phase"`
+	Processed        int          `json:"processed"`
+	Error            string       `json:"error,omitempty"`
 }
 
 // Counters describe committed comparisons, including repeated checks on retry.
@@ -38,6 +47,12 @@ type SyncLog struct {
 }
 
 type SyncTask struct {
+	RetryAt         time.Time    `json:"retryAt,omitempty"`
+	Failures        int          `json:"failures,omitempty"`
+	ScopeType       string       `json:"scopeType,omitempty"`
+	Reasons         []string     `json:"reasons,omitempty"`
+	Discover        bool         `json:"discover,omitempty"`
+	Recovery        bool         `json:"recovery,omitempty"`
 	LogVersion      int          `json:"logVersion,omitempty"`
 	Scope           string       `json:"scope,omitempty"`
 	RecentDays      int          `json:"recentDays,omitempty"`
@@ -73,9 +88,14 @@ type SyncStatus struct {
 	PendingReconcile bool      `json:"pendingReconcile"`
 }
 
-func (t SyncTask) Active() bool { return t.State == "queued" || t.State == "running" }
+func (t SyncTask) Active() bool      { return t.State == "queued" || t.State == "running" }
+func (t SyncTask) Incremental() bool { return t.Kind == "quick" || t.Kind == "delta" }
 func (t SyncTask) Clone() SyncTask {
 	t.Folders = append([]SyncFolder(nil), t.Folders...)
+	for i := range t.Folders {
+		t.Folders[i].UIDs = append([]uint32(nil), t.Folders[i].UIDs...)
+	}
+	t.Reasons = append([]string(nil), t.Reasons...)
 	t.Logs = append([]SyncLog(nil), t.Logs...)
 	return t
 }
@@ -92,3 +112,8 @@ func (a Account) ReconcileMinutes() int {
 	return a.ReconcileIntervalMinutes
 }
 func (a Account) ReconcileOn() bool { return a.ReconcileEnabled == nil || *a.ReconcileEnabled }
+
+// Legacy checkpoints predate the explicit initial-baseline marker.
+func (b Mailbox) HasBaseline() bool {
+	return b.Initialized || b.BaselineVersion == 0 && b.UIDValidity != 0
+}

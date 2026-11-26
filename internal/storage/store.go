@@ -65,11 +65,12 @@ type commit struct {
 	Seq      string `json:"lastSeq"`
 }
 type Index struct {
-	Remote  map[string]string
-	Folders map[string][]string
-	All     []string
-	Unread  map[string]int
-	Keys    map[string]string
+	UIDOrder map[string][]string
+	Remote   map[string]string
+	Folders  map[string][]string
+	All      []string
+	Unread   map[string]int
+	Keys     map[string]string
 }
 type Store struct {
 	mu              sync.RWMutex
@@ -288,7 +289,7 @@ func apply(s *domain.State, op Op) error {
 	}
 }
 func (s *Store) reindex() {
-	i := Index{Remote: map[string]string{}, Folders: map[string][]string{}, Unread: map[string]int{}, Keys: map[string]string{}}
+	i := Index{UIDOrder: map[string][]string{}, Remote: map[string]string{}, Folders: map[string][]string{}, Unread: map[string]int{}, Keys: map[string]string{}}
 	for id, m := range s.state.Messages {
 		i.Remote[Remote(m)] = id
 		i.Folders[m.MailboxID] = append(i.Folders[m.MailboxID], id)
@@ -308,6 +309,15 @@ func (s *Store) reindex() {
 	for k, ids := range i.Folders {
 		sort.Slice(ids, func(a, b int) bool { return less(ids[a], ids[b]) })
 		i.Folders[k] = ids
+		ordered := append([]string(nil), ids...)
+		sort.Slice(ordered, func(a, b int) bool {
+			x, y := s.state.Messages[ordered[a]], s.state.Messages[ordered[b]]
+			if x.UID == y.UID {
+				return x.ID < y.ID
+			}
+			return x.UID < y.UID
+		})
+		i.UIDOrder[k] = ordered
 	}
 	for id, j := range s.state.Jobs {
 		i.Keys[j.Key] = id
@@ -705,7 +715,7 @@ func (s *Store) updateIndex(old map[string]domain.Message, ops []Op) {
 				s.index.Unread[next.MailboxID]++
 			}
 		}
-		if prev.ID == "" || next.ID == "" || prev.MailboxID != next.MailboxID || !prev.Date.Equal(next.Date) {
+		if prev.ID == "" || next.ID == "" || prev.MailboxID != next.MailboxID || prev.UID != next.UID || prev.UIDValidity != next.UIDValidity || !prev.Date.Equal(next.Date) {
 			reorder = true
 			folders[prev.MailboxID] = true
 			folders[next.MailboxID] = true
@@ -760,6 +770,40 @@ func (s *Store) updateIndex(old map[string]domain.Message, ops []Op) {
 				}
 			}
 			s.index.Folders[folder] = ids
+			retained := make([]string, 0, len(s.index.UIDOrder[folder]))
+			for _, id := range s.index.UIDOrder[folder] {
+				if !changed[id] {
+					retained = append(retained, id)
+				}
+			}
+			var additions []string
+			for id := range changed {
+				if m := s.state.Messages[id]; m.ID != "" && m.MailboxID == folder {
+					additions = append(additions, id)
+				}
+			}
+			uidLess := func(a, b string) bool {
+				x, y := s.state.Messages[a], s.state.Messages[b]
+				if x.UID == y.UID {
+					return a < b
+				}
+				return x.UID < y.UID
+			}
+			sort.Slice(additions, func(a, b int) bool { return uidLess(additions[a], additions[b]) })
+			ordered := make([]string, 0, len(retained)+len(additions))
+			left, right := 0, 0
+			for left < len(retained) && right < len(additions) {
+				if uidLess(additions[right], retained[left]) {
+					ordered = append(ordered, additions[right])
+					right++
+				} else {
+					ordered = append(ordered, retained[left])
+					left++
+				}
+			}
+			ordered = append(ordered, retained[left:]...)
+			ordered = append(ordered, additions[right:]...)
+			s.index.UIDOrder[folder] = ordered
 		}
 	}
 	for _, op := range ops {

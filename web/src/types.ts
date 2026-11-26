@@ -5,6 +5,7 @@ export type Endpoint = {
   username: string;
 };
 export type Account = {
+  imapMaxConnections?: number;
   syncScope?: "recent" | "all";
   reconcileEnabled?: boolean;
   reconcileIntervalMinutes?: number;
@@ -119,6 +120,7 @@ export type IdleStatus = {
   state: string;
   connected: number;
   total: number;
+  limitedFolders?: string[];
   error?: string;
   retryAt?: string;
   lastEventAt?: string;
@@ -151,6 +153,9 @@ export type SyncLog = {
   stats: SyncCounters;
 };
 export type SyncTask = {
+  retryAt?: string;
+  scopeType?: string;
+  reasons?: string[];
   logVersion?: number;
   scope?: string;
   recentDays?: number;

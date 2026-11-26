@@ -145,3 +145,33 @@ func TestSyncLogGroupsAreIsolatedAndDetailsAreAvailable(t *testing.T) {
 		t.Fatal("invalid group accepted")
 	}
 }
+
+func TestDeltaLogsAreIncrementalAndKeepScope(t *testing.T) {
+	s, h := testServer(t)
+	cookie, _ := loginTest(t, h)
+	task := domain.SyncTask{ID: "directory-delta", AccountID: "test-account", Kind: "delta", State: "succeeded", ScopeType: "uids", Reasons: []string{"idle:fetch"}, Folders: []domain.SyncFolder{{MailboxID: "inbox", UIDs: []uint32{42}}}}
+	if e := s.App.Store.Update(func(st domain.State, _ storage.Index) ([]storage.Op, error) {
+		return []storage.Op{storage.Put("syncTasks", task.ID, task)}, nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+	for _, group := range []string{"quick", "full"} {
+		w := req(h, "GET", "/api/v1/accounts/test-account/sync-tasks?group="+group, "", nil, cookie, "")
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		var body struct {
+			Items []domain.SyncTask `json:"items"`
+		}
+		if e := json.Unmarshal(w.Body.Bytes(), &body); e != nil {
+			t.Fatal(e)
+		}
+		if group == "full" {
+			if len(body.Items) != 0 {
+				t.Fatal("delta polluted full logs")
+			}
+		} else if len(body.Items) != 1 || body.Items[0].ScopeType != "uids" || body.Items[0].Folders[0].UIDs[0] != 42 {
+			t.Fatal("lost incremental scope", body)
+		}
+	}
+}

@@ -72,7 +72,7 @@ func (s *Server) syncTasks(w http.ResponseWriter, r *http.Request) {
 	s.App.Store.Read(func(st domain.State, _ storage.Index) {
 		_, exists = st.Accounts[r.PathValue("id")]
 		for _, t := range st.SyncTasks {
-			if t.AccountID == r.PathValue("id") && (group == "" || group == "quick" && t.Kind == "quick" || group == "full" && t.Kind != "quick") {
+			if t.AccountID == r.PathValue("id") && (group == "" || group == "quick" && t.Incremental() || group == "full" && !t.Incremental()) {
 				items = append(items, publicTask(t.Clone()))
 			}
 		}

@@ -18,7 +18,7 @@ afterEach(() => {
   cleanup();
   vi.resetAllMocks();
 });
-it("按完整对齐和快速同步分类显示日志、对比统计及旧日志提示", async () => {
+it("按完整对齐和增量同步分类显示日志、对比统计及旧日志提示", async () => {
   const stats = { compared: 8, added: 3, updated: 1, unchanged: 2, deleted: 2 };
   const task: SyncTask = {
     id: "full",
@@ -78,7 +78,7 @@ it("按完整对齐和快速同步分类显示日志、对比统计及旧日志�
   await user.click(screen.getByText("同步日志", { exact: true }));
   const full = screen.getByRole("tab", { name: /完整对齐/ });
   expect(full.getAttribute("aria-selected")).toBe("true");
-  expect(screen.queryByRole("button", { name: /快速同步 ·/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /增量同步 ·/ })).toBeNull();
   await user.click(
     await screen.findByRole("button", { name: /完整对齐 · 已完成/ }),
   );
@@ -92,10 +92,12 @@ it("按完整对齐和快速同步分类显示日志、对比统计及旧日志�
   ).toBeGreaterThan(0);
   expect(within(panel).getByText(/二次精确查询/)).toBeTruthy();
   expect(within(panel).getByText("UID 5–7")).toBeTruthy();
-  await user.click(screen.getByRole("tab", { name: /快速同步/ }));
+  await user.click(screen.getByRole("tab", { name: /增量同步/ }));
   expect(screen.queryByRole("button", { name: /完整对齐 ·/ })).toBeNull();
   expect(screen.getByText("旧版任务未记录新增、删除明细。")).toBeTruthy();
-  expect(screen.getByText(/快速同步由 IDLE 新邮件事件或手动触发/)).toBeTruthy();
+  expect(
+    screen.getByText(/IDLE 按目录或 UID 更新新增、标记与删除/),
+  ).toBeTruthy();
   await user.keyboard("{ArrowLeft}");
   expect(full.getAttribute("aria-selected")).toBe("true");
 });
@@ -134,4 +136,39 @@ it("显示 IDLE 的部分连接、重连提示及暂停状态", async () => {
   expect(screen.getAllByText("邮箱已暂停").length).toBeGreaterThan(0);
   expect(screen.queryByText(/IDLE 连接已断开/)).toBeNull();
   await waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+});
+
+it("目录任务归入增量日志并显示 UID 范围和事件原因", async () => {
+  const delta: SyncTask = {
+    id: "delta",
+    accountId: "a",
+    kind: "delta",
+    state: "succeeded",
+    scopeType: "uids",
+    trigger: "idle:fetch",
+    reasons: ["idle:fetch"],
+    folders: [
+      { mailboxId: "inbox", name: "收件箱", phase: "done", processed: 1 },
+    ],
+  };
+  vi.mocked(api).mockImplementation(async (url) => ({
+    items: String(url).includes("group=quick") ? [delta] : [],
+  }));
+  render(
+    <SyncPanel
+      account={{ id: "a", name: "工作邮箱", syncDays: 30 } as Account}
+      onSaved={async () => {}}
+    />,
+  );
+  const user = userEvent.setup();
+  await waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+  await user.click(screen.getByText("同步日志"));
+  expect(screen.queryByRole("button", { name: /目录增量/ })).toBeNull();
+  await user.click(screen.getByRole("tab", { name: /增量同步/ }));
+  expect(screen.getByRole("button", { name: /目录增量/ })).toBeTruthy();
+  expect(screen.getByText(/范围：指定 UID/)).toBeTruthy();
+  expect(screen.getByText(/标记变化 · 范围/)).toBeTruthy();
+  expect(screen.getByRole("tab", { name: /完整对齐/ }).textContent).toContain(
+    "0",
+  );
 });

@@ -1342,9 +1342,9 @@ try {
   await syncModal
     .getByRole("button", { name: /全历史同步 · 等待执行/ })
     .waitFor();
-  await syncModal.getByRole("tab", { name: /快速同步/ }).click();
+  await syncModal.getByRole("tab", { name: /增量同步/ }).click();
   assert.equal(
-    await syncModal.getByRole("button", { name: /快速同步 · 已完成/ }).count(),
+    await syncModal.getByRole("button", { name: /增量同步 · 已完成/ }).count(),
     5,
   );
   assert.equal(
@@ -1354,7 +1354,7 @@ try {
     0,
   );
   await syncModal
-    .getByRole("button", { name: /快速同步 · 已完成/ })
+    .getByRole("button", { name: /增量同步 · 已完成/ })
     .first()
     .click();
   await syncModal

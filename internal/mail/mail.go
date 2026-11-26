@@ -15,6 +15,7 @@ import (
 	stdmail "net/mail"
 	"net/smtp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a1zaza/nekoport/internal/domain"
@@ -49,7 +50,16 @@ func ValidateEndpoint(e domain.Endpoint) error {
 	}
 	return nil
 }
-func DialIMAP(ctx context.Context, e domain.Endpoint, password string) (*client.Client, error) {
+
+type leasedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *leasedConn) Close() error { err := c.Conn.Close(); c.once.Do(c.release); return err }
+
+func DialIMAP(ctx context.Context, e domain.Endpoint, password string, onClose ...func()) (*client.Client, error) {
 	if err := ValidateEndpoint(e); err != nil {
 		return nil, err
 	}
@@ -58,6 +68,9 @@ func DialIMAP(ctx context.Context, e domain.Endpoint, password string) (*client.
 	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(e.Host, fmt.Sprint(e.Port)))
 	if err != nil {
 		return nil, fail("连接", err)
+	}
+	if len(onClose) > 0 {
+		conn = &leasedConn{Conn: conn, release: onClose[0]}
 	}
 	conn = watch(ctx, conn)
 	conn.SetDeadline(time.Now().Add(45 * time.Second))
